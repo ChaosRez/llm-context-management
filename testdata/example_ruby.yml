@@ -1,0 +1,6 @@
+name: "Ruby Learning Path"
+model_name: "Qwen/Qwen1.5-0.5B-Chat"
+user_id: "user123"
+messages:
+  - "Hello, how can I improve my Ruby skills?"
+  - "I know symbols, arrays, loops, functions, and classes. What else should I learn in this language?"
