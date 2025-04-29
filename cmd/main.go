@@ -1,9 +1,12 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	Llama "llm-context-management/internal/pkg/llama_wrapper"
+)
 
 func main() {
-	client := NewLlamaClient("http://localhost:8080")
+	client := Llama.NewLlamaClient("http://localhost:8080")
 
 	compReq := map[string]interface{}{
 		"model":       "Qwen1.5-0.5B-Chat-Q4_K_M:latest",

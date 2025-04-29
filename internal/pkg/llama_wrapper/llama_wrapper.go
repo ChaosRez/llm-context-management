@@ -1,4 +1,4 @@
-package main
+package llama_wrapper
 
 import (
 	"bytes"
