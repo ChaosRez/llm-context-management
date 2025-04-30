@@ -272,7 +272,7 @@ func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMess
 	}
 	// Add the final assistant start tag if needed by the model,
 	// otherwise, remove or comment out the next line.
-	formatted += "<|im_start|>assistant\n"
+	//formatted += "<|im_start|>assistant\n"
 	return formatted, nil
 }
 
