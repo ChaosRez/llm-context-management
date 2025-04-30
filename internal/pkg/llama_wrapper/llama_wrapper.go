@@ -13,6 +13,9 @@ type LlamaClient struct {
 	BaseURL string
 	APIKey  string // optional
 }
+type tokenizeResponse struct {
+	Tokens []int `json:"tokens"`
+}
 
 // NewLlamaClient creates a new client.
 func NewLlamaClient(baseURL string) *LlamaClient {
@@ -65,9 +68,9 @@ func (c *LlamaClient) Completion(req map[string]interface{}) (map[string]interfa
 // Tokenize text to tokens.
 func (c *LlamaClient) Tokenize(content string) ([]int, error) {
 	body := map[string]interface{}{"content": content}
-	var res []int
+	var res tokenizeResponse
 	err := c.doRequest("POST", "/tokenize", body, &res)
-	return res, err
+	return res.Tokens, err
 }
 
 // Detokenize tokens to text.
