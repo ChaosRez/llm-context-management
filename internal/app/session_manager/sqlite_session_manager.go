@@ -260,7 +260,7 @@ func (mgr *SQLiteSessionManager) GetSessionMessages(sessionID string, limit int)
 	return messages, nil
 }
 
-// GetTextSessionContext returns formatted context for LLM inference (plain text, \n-separated)
+// GetTextSessionContext returns formatted context for LLM inference using the specified format.
 func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMessages int) (string, error) {
 	messages, err := mgr.GetSessionMessages(sessionID, maxMessages)
 	if err != nil {
@@ -268,16 +268,11 @@ func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMess
 	}
 	formatted := ""
 	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			formatted += fmt.Sprintf("<system>\n%s\n</system>\n", msg.Content)
-		case "user":
-			formatted += fmt.Sprintf("<user>\n%s\n</user>\n", msg.Content)
-		case "assistant":
-			formatted += fmt.Sprintf("<assistant>\n%s\n</assistant>\n", msg.Content)
-		}
+		formatted += fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content)
 	}
-	formatted += "<assistant>\n"
+	// Add the final assistant start tag if needed by the model,
+	// otherwise, remove or comment out the next line.
+	formatted += "<|im_start|>assistant\n"
 	return formatted, nil
 }
 
