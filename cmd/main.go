@@ -78,7 +78,7 @@ func main() {
 				req = map[string]interface{}{
 					"model":       scen.ModelName,
 					"prompt":      prompt,
-					"temperature": 0, // Example values, adjust as needed
+					"temperature": 0,
 					"seed":        123,
 					"stream":      false,
 				}
@@ -93,7 +93,7 @@ func main() {
 					log.Infof("No existing tokenized context found for session %s, proceeding without.", sessionID)
 				}
 
-				prompt = message // Use the message directly as prompt
+				prompt = message
 				req = map[string]interface{}{
 					"model":       scen.ModelName,
 					"prompt":      prompt,
@@ -113,10 +113,9 @@ func main() {
 				log.Fatalf("Completion error: %v", err)
 			}
 
-			// Add user message to session
 			_, err = sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
 			if err != nil {
-				log.Errorf("Failed to add user message: %v", err) // Log error instead of ignoring
+				log.Errorf("Failed to add user message: %v", err)
 			}
 
 			// Process and add assistant response to session
@@ -125,7 +124,7 @@ func main() {
 				fmt.Printf("Response: \n%s\n", assistantMsg)
 				_, err = sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
 				if err != nil {
-					log.Errorf("Failed to add assistant message: %v", err) // Log error
+					log.Errorf("Failed to add assistant message: %v", err)
 				}
 
 				// Update tokenized context in Redis *after* adding both messages

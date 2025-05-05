@@ -10,6 +10,9 @@ import (
 	"net/http"
 )
 
+const rawHistoryLength = 20
+const sessionDurationDays = 1
+
 // Server holds dependencies for the HTTP server.
 type Server struct {
 	llamaService        *Llama.LlamaClient
@@ -86,7 +89,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	// If no session_id, create one
 	if clientReq.SessionID == "" {
-		sessionID, err := s.sessionManager.CreateSession("auto", 0)
+		sessionID, err := s.sessionManager.CreateSession("auto", sessionDurationDays)
 		if err != nil {
 			http.Error(w, "Failed to create session", http.StatusInternalServerError)
 			return
@@ -108,7 +111,6 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if clientReq.Mode == "raw" {
 		// Default history length for raw context retrieval
-		const rawHistoryLength = 20
 		textContext, err := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
 		if err != nil {
 			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, err)
