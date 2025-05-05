@@ -162,7 +162,6 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Infof("Using 'tokenized' context retrieval for session %s", clientReq.SessionID)
 		tokenizedContext, err := s.redisContextStorage.GetTokenizedSessionContext(clientReq.SessionID)
 		if err != nil {
-			// Log error but proceed, context might not exist yet
 			log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, err)
 		} else if tokenizedContext != nil {
 			log.Debugf("Retrieved tokenized context for session %s", clientReq.SessionID)
@@ -192,15 +191,15 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
-	// --- Add session_id and user_id to the response ---
-	// Ensure resp is not nil before adding the session ID
+	// --- Add session_id, user_id, and mode to the response ---
 	if resp == nil {
 		log.Warnf("Llama service returned nil response for session %s, initializing empty map.", clientReq.SessionID)
 		resp = make(map[string]interface{}) // Initialize if nil
 	}
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
 	resp["user_id"] = effectiveUserID        // Add the effective user_id used/provided
-	log.Debugf("Added session_id %s and user_id %s to response map", clientReq.SessionID, effectiveUserID)
+	resp["mode"] = clientReq.Mode            // Add the mode used for the request
+	log.Debugf("Added session_id %s, user_id %s, and mode %s to response map", clientReq.SessionID, effectiveUserID, clientReq.Mode)
 
 	// --- Send response ---
 	w.Header().Set("Content-Type", "application/json")
