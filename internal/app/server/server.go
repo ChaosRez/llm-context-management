@@ -34,7 +34,7 @@ func NewServer(
 type CompletionRequest struct {
 	Mode        string                 `json:"mode"` // "raw" or "tokenized"
 	SessionID   string                 `json:"session_id"`
-	Message     string                 `json:"message"`
+	Prompt      string                 `json:"prompt"`
 	Model       string                 `json:"model"`
 	Temperature float64                `json:"temperature"`
 	Seed        int                    `json:"seed"`
@@ -62,18 +62,11 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	// Remove known fields from the map
+	// Only remove "mode"
 	delete(allFields, "mode")
-	delete(allFields, "session_id")
-	delete(allFields, "message")
-	delete(allFields, "model")
-	delete(allFields, "temperature")
-	delete(allFields, "seed")
-	delete(allFields, "stream")
 
 	// Store remaining fields
 	cr.OtherParams = allFields
-
 	return nil
 }
 
@@ -91,7 +84,16 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// --- Prepare request for LlamaClient ---
+	// If no session_id, create one
+	if clientReq.SessionID == "" {
+		sessionID, err := s.sessionManager.CreateSession("auto", 0)
+		if err != nil {
+			http.Error(w, "Failed to create session", http.StatusInternalServerError)
+			return
+		}
+		clientReq.SessionID = sessionID
+	}
+
 	llamaReq := make(map[string]interface{})
 
 	// Copy explicitly some and other parameters
@@ -113,8 +115,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to retrieve session context", http.StatusInternalServerError)
 			return
 		}
-		// Construct prompt for raw mode
-		prompt := textContext + "<|im_start|>user\n" + clientReq.Message + "<|im_end|>\n"
+		prompt := textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
 		llamaReq["prompt"] = prompt
 
 	} else if clientReq.Mode == "tokenized" {
@@ -123,9 +124,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			// Log error but proceed, context might not exist yet
 			log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, err)
 		}
-		// Set prompt directly to the message
-		llamaReq["prompt"] = clientReq.Message
-		// Add context only if it exists
+		llamaReq["prompt"] = clientReq.Prompt
 		if tokenizedContext != nil {
 			llamaReq["context"] = tokenizedContext
 		}
@@ -154,8 +153,6 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/completion", s.handleCompletion)
-	// Add other endpoints here (e.g., /health, /session)
-
 	log.Infof("Starting server on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }
