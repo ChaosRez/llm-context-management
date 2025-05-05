@@ -3,6 +3,7 @@ package llama_wrapper
 import (
 	"bytes"
 	"encoding/json"
+	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
 	"strings"
@@ -60,6 +61,7 @@ func (c *LlamaClient) Health() (map[string]interface{}, error) {
 
 // Completion sends a prompt and options to /completion.
 func (c *LlamaClient) Completion(req map[string]interface{}) (map[string]interface{}, error) {
+	log.Debugf("prompt: %s", req["prompt"])
 	var res map[string]interface{}
 	err := c.doRequest("POST", "/completion", req, &res)
 	return res, err
