@@ -96,9 +96,13 @@ func (mgr *SQLiteSessionManager) CreateUser(userID string, metadata map[string]i
 }
 
 func (mgr *SQLiteSessionManager) CreateSession(userID string, sessionDurationDays int) (string, error) {
-	if sessionDurationDays == 0 {
-		sessionDurationDays = 7
-	}
+	//if sessionDurationDays == 0 {
+	//	sessionDurationDays = 7
+	//}
+	sessionID := uuid.NewString()
+	now := time.Now().Unix()
+	expiresAt := now + int64(sessionDurationDays*24*60*60)
+
 	db, err := mgr.open()
 	if err != nil {
 		return "", err
@@ -116,10 +120,6 @@ func (mgr *SQLiteSessionManager) CreateSession(userID string, sessionDurationDay
 	} else if err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
-
-	sessionID := uuid.NewString()
-	now := time.Now().Unix()
-	expiresAt := now + int64(sessionDurationDays*24*60*60)
 
 	_, err = db.Exec(
 		"INSERT INTO sessions (session_id, user_id, created_at, last_active, expires_at) VALUES (?, ?, ?, ?, ?)",
