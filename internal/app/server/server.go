@@ -109,6 +109,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		clientReq.SessionID = sessionID
+		log.Infof("Created new session ID: %s", clientReq.SessionID) // Log the new session ID
+	} else {
+		log.Infof("Using existing session ID: %s", clientReq.SessionID) // Log the provided session ID
 	}
 
 	llamaReq := make(map[string]interface{})
@@ -158,6 +161,13 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error processing completion request", http.StatusInternalServerError)
 		return
 	}
+
+	// --- Add session_id to the response ---
+	// Ensure resp is not nil before adding the session ID
+	if resp == nil {
+		resp = make(map[string]interface{}) // Initialize if nil
+	}
+	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
 
 	// --- Send response ---
 	w.Header().Set("Content-Type", "application/json")
