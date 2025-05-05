@@ -1,120 +1,166 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
+	"bufio" // Needed for scenario mode
+	"fmt"   // Needed for scenario mode
 	log "github.com/sirupsen/logrus"
-	Scenario "llm-context-management/internal/app/scenario"
+	Scenario "llm-context-management/internal/app/scenario" // Needed for scenario mode
+	Server "llm-context-management/internal/app/server"
 	SessionManager "llm-context-management/internal/app/session_manager"
 	ContextStorage "llm-context-management/internal/pkg/context_storage"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
-	"os"
+	"os" // Needed for scenario mode
 )
 
+// TODO fix the Payload keys for server
 func main() {
-	// Load scenario from YAML
-	scen, err := Scenario.LoadScenario("testdata/example_ruby.yml")
-	if err != nil {
-		log.Fatalf("Failed to load scenario: %v", err)
-	}
+	// --- Configuration ---
+	const runServerMode = false // false to run the interactive scenario mode (file).
+	const dbPath = "sessions.db"
+	const llamaURL = "http://localhost:8080"
+	const redisAddr = "localhost:6379"
+	const serverListenAddr = ":8081"
+	const scenarioFilePath = "testdata/example_ruby.yml" // only in scenario mode
 
-	// Initialize services
-	sessionManager := SessionManager.NewSQLiteSessionManager("sessions.db")
-	llamaService := Llama.NewLlamaClient("http://localhost:8080")
-	redisContextStorage := ContextStorage.NewRedisContextStorage("localhost:6379", "", 0)
+	// --- Initialize common services ---
+	sessionManager := SessionManager.NewSQLiteSessionManager(dbPath)
+	llamaService := Llama.NewLlamaClient(llamaURL)
+	redisContextStorage := ContextStorage.NewRedisContextStorage(redisAddr, "", 0)
 
-	// Prompt user to choose context retrieval method
-	input := "tokenized" // "raw" or "tokenized"
-	log.Infof("running in '%s' mode", input)
+	if runServerMode {
+		// --- Server Mode ---
+		log.Info("Starting in Server Mode...")
+		srv := Server.NewServer(llamaService, sessionManager, redisContextStorage)
+		log.Fatal(srv.Start(serverListenAddr))
 
-	var sessionID string
+	} else {
+		// --- Interactive Scenario Mode ---
+		log.Info("Starting in Interactive Scenario Mode...")
 
-	for _, message := range scen.Messages {
-		log.Printf("Processing message: '%s'", message)
-		if sessionID == "" {
-			var err error
-			sessionID, err = sessionManager.CreateSession(scen.UserID, 7)
-			if err != nil {
-				log.Fatalf("Failed to create session: %v", err)
-			}
-			log.Printf("Created a new Session ID: %s", sessionID)
-		}
-		modelName := scen.ModelName
-
-		var (
-			tokenizedContext []int
-			textContext      string
-			prompt           string
-			req              map[string]interface{}
-		)
-
-		if input == "raw" {
-			textContext, err = sessionManager.GetTextSessionContext(sessionID, 20)
-			if err != nil {
-				log.Fatalf("Failed to get raw session context: %v", err)
-			}
-			prompt = textContext + "<|im_start|>user\n" + message + "<|im_end|>\n"
-			req = map[string]interface{}{
-				"model":       scen.ModelName,
-				"prompt":      prompt,
-				"temperature": 0,
-				"seed":        123,
-				"stream":      false,
-			}
-		} else if input == "tokenized" {
-			tokenizedContext, err = redisContextStorage.GetTokenizedSessionContext(sessionID)
-			if err != nil {
-				log.Fatalf("Failed to get tokenized session context: %v", err)
-			}
-			prompt = message
-			req = map[string]interface{}{
-				"model":       scen.ModelName,
-				"prompt":      prompt,
-				"temperature": 0,
-				"seed":        123,
-				"stream":      false,
-			}
-			if tokenizedContext != nil {
-				req["context"] = tokenizedContext
-			}
-		} else {
-			log.Fatalf("Invalid context retrieval method: %s", input)
-		}
-
-		resp, err := llamaService.Completion(req)
+		// Load scenario from YAML
+		scen, err := Scenario.LoadScenario(scenarioFilePath)
 		if err != nil {
-			log.Fatalf("Completion error: %v", err)
+			log.Fatalf("Failed to load scenario '%s': %v", scenarioFilePath, err)
 		}
-		// Frst, add prompt message to session
-		sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
+		log.Infof("Loaded scenario: %s", scen.Name)
+		log.Infof("Using model: %s", scen.ModelName)
 
-		// Then, add response to the session
-		fmt.Printf("Response: \n%+v\n", resp["content"])
-		if resp != nil && resp["content"] != nil {
-			assistantMsg := fmt.Sprintf("%v", resp["content"])
-			sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
-			err = redisContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
-			if err != nil {
-				log.Fatalf("Failed to update session context: %v", err)
-			}
+		// Create a new session for the scenario
+		sessionID, err := sessionManager.CreateSession(scen.Name, 0)
+		if err != nil {
+			log.Fatalf("Failed to create session: %v", err)
 		}
-	}
+		log.Infof("Created session ID: %s", sessionID)
 
-	// Prompt for session deletion
-	if sessionID != "" {
-		fmt.Print("Do you want to delete current session? (y/n): ")
+		modelName := scen.ModelName // Capture model name for session messages
+
+		// Interactive loop (from yaml)
 		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		input = string([]byte(input))
-		switch s := input; s == "y\n" || s == "\n" || s == "yes\n" || s == "yy\n" {
-		case true:
-			if err := sessionManager.DeleteSession(sessionID); err != nil {
-				log.Printf("Failed to delete session: %v", err)
+		for _, message := range scen.Messages {
+			fmt.Printf("\nProcessing message: %s\n", message)
+			fmt.Print("Choose context retrieval (raw/tokenized): ")
+			input, _ := reader.ReadString('\n')
+			input = string([]byte(input[:len(input)-1])) // Trim newline
+
+			var req map[string]interface{}
+			var prompt string
+			var textContext string
+			var tokenizedContext []int
+			var err error
+
+			if input == "raw" {
+				const rawHistoryLength = 20 // Or make configurable
+				textContext, err = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength)
+				if err != nil {
+					log.Fatalf("Failed to get raw session context: %v", err)
+				}
+				prompt = textContext + "<|im_start|>user\n" + message + "<|im_end|>\n"
+				req = map[string]interface{}{
+					"model":       scen.ModelName,
+					"prompt":      prompt,
+					"temperature": 0, // Example values, adjust as needed
+					"seed":        123,
+					"stream":      false,
+				}
+			} else if input == "tokenized" {
+				tokenizedContext, err = redisContextStorage.GetTokenizedSessionContext(sessionID)
+				// Allow proceeding even if context doesn't exist yet (first message)
+				if err != nil && err.Error() != "redis: nil" { // Check for specific redis nil error
+					log.Warnf("Failed to get tokenized session context (proceeding without): %v", err)
+				} else if err == nil {
+					log.Debugf("Retrieved tokenized context for session %s", sessionID)
+				} else {
+					log.Infof("No existing tokenized context found for session %s, proceeding without.", sessionID)
+				}
+
+				prompt = message // Use the message directly as prompt
+				req = map[string]interface{}{
+					"model":       scen.ModelName,
+					"prompt":      prompt,
+					"temperature": 0,
+					"seed":        123,
+					"stream":      false,
+				}
+				if tokenizedContext != nil {
+					req["context"] = tokenizedContext
+				}
 			} else {
-				log.Printf("Deleted session %s.", sessionID)
+				log.Fatalf("Invalid context retrieval method: %s. Choose 'raw' or 'tokenized'.", input)
 			}
-		default:
-			log.Printf("Session %s NOT deleted.", sessionID)
+
+			resp, err := llamaService.Completion(req)
+			if err != nil {
+				log.Fatalf("Completion error: %v", err)
+			}
+
+			// Add user message to session
+			_, err = sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
+			if err != nil {
+				log.Errorf("Failed to add user message: %v", err) // Log error instead of ignoring
+			}
+
+			// Process and add assistant response to session
+			if resp != nil && resp["content"] != nil {
+				assistantMsg := fmt.Sprintf("%v", resp["content"])
+				fmt.Printf("Response: \n%s\n", assistantMsg)
+				_, err = sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
+				if err != nil {
+					log.Errorf("Failed to add assistant message: %v", err) // Log error
+				}
+
+				// Update tokenized context in Redis *after* adding both messages
+				err = redisContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
+				if err != nil {
+					// Log warning instead of fatal, maybe allow continuation?
+					log.Warnf("Failed to update tokenized session context: %v", err)
+				} else {
+					log.Debugf("Updated tokenized context for session %s", sessionID)
+				}
+			} else {
+				log.Warn("Received nil or empty response content.")
+			}
+		} // End of message loop
+
+		// Prompt for session deletion (optional)
+		if sessionID != "" {
+			fmt.Print("Do you want to delete current session? (y/n): ")
+			input, _ := reader.ReadString('\n')
+			input = string([]byte(input)) // Keep newline for comparison
+			switch input {
+			case "y\n", "Y\n", "yes\n", "Yes\n":
+				if err := sessionManager.DeleteSession(sessionID); err != nil {
+					log.Printf("Failed to delete session %s: %v", sessionID, err)
+				} else {
+					log.Printf("Deleted session %s.", sessionID)
+				}
+				if err := redisContextStorage.DeleteSessionContext(sessionID); err != nil {
+					log.Printf("Failed to delete Redis context for session %s: %v", sessionID, err)
+				} else {
+					log.Printf("Deleted Redis context for session %s.", sessionID)
+				}
+			default:
+				log.Printf("Session %s NOT deleted.", sessionID)
+			}
 		}
-	}
+	} // End of mode switch
 }

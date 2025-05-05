@@ -51,6 +51,7 @@ func (r *RedisContextStorage) GetTokenizedSessionContext(sessionID string) ([]in
 
 	// 2. Cache miss (err == redis.Nil)
 	log.Warnf("Cache miss for session ID: %s. Generating and caching tokenized context.", sessionID)
+	// Return nil, nil to indicate cache miss without error, letting the caller handle generation.
 	return nil, nil
 }
 
@@ -96,6 +97,7 @@ func (r *RedisContextStorage) UpdateSessionContext(sessionID string, sessionMana
 	}
 
 	// 4. Update tokenized context in Redis.
+	// Use Set with 0 expiration for persistence.
 	err = r.client.Set(ctx, cacheKey, string(tokenBytes), 0).Err()
 	if err != nil {
 		log.Errorf("Failed to update tokenized context in Redis for session ID %s: %v", sessionID, err)
@@ -103,5 +105,22 @@ func (r *RedisContextStorage) UpdateSessionContext(sessionID string, sessionMana
 	}
 
 	log.Infof("Tokenized context cache successfully updated for session ID: %s", sessionID)
+	return nil
+}
+
+// DeleteSessionContext removes the tokenized context for a session from Redis.
+func (r *RedisContextStorage) DeleteSessionContext(sessionID string) error {
+	ctx := context.Background()
+	cacheKey := "ctx_" + sessionID
+	log.Infof("Attempting to delete tokenized context for session ID: %s from cache key: %s", sessionID, cacheKey)
+
+	err := r.client.Del(ctx, cacheKey).Err()
+	if err != nil {
+		// Log error but don't necessarily fail the whole operation if deletion fails
+		log.Errorf("Failed to delete tokenized context from Redis for session ID %s: %v", sessionID, err)
+		return fmt.Errorf("failed to delete redis key %s: %w", cacheKey, err)
+	}
+
+	log.Infof("Successfully deleted tokenized context from Redis for session ID: %s", sessionID)
 	return nil
 }
