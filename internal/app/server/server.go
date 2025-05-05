@@ -145,6 +145,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	log.Debugf("Prepared Llama request parameters for session %s (excluding prompt/context)", clientReq.SessionID)
 
 	var err error
+	var finalPrompt string // Store the final prompt sent to Llama for logging/history
+
 	if clientReq.Mode == "raw" {
 		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
 		textContext, err := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
@@ -153,8 +155,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to retrieve session context", http.StatusInternalServerError)
 			return
 		}
-		prompt := textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
-		llamaReq["prompt"] = prompt
+		// Construct the prompt including context and user message for Llama
+		finalPrompt = textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
+		llamaReq["prompt"] = finalPrompt
 		log.Debugf("Prepared raw prompt for session %s", clientReq.SessionID)
 
 	} else if clientReq.Mode == "tokenized" {
@@ -168,7 +171,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			log.Infof("No existing tokenized context found for session %s, proceeding without.", clientReq.SessionID)
 		}
 
-		llamaReq["prompt"] = clientReq.Prompt
+		// The prompt sent to Llama is just the user's message in tokenized mode
+		finalPrompt = clientReq.Prompt
+		llamaReq["prompt"] = finalPrompt
 		// Add the retrieved tokenized context if available
 		if tokenizedContext != nil {
 			llamaReq["context"] = tokenizedContext // This key is added internally, not accepted from client
@@ -190,11 +195,47 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
-	// --- Add session_id, user_id, and mode to the response ---
-	if resp == nil {
-		log.Warnf("Llama service returned nil response for session %s, initializing empty map.", clientReq.SessionID)
-		resp = make(map[string]interface{}) // Initialize if nil
+	// --- Add user message to session history ---
+	// Note: We add the *original* user prompt (clientReq.Prompt), not the potentially context-prepended one (finalPrompt)
+	_, err = s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model)
+	if err != nil {
+		// Log error but continue processing the response
+		log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
+	} else {
+		log.Debugf("Added user message to session %s", clientReq.SessionID)
 	}
+
+	// --- Process and add assistant response to session history ---
+	assistantMsg := "" // Initialize empty
+	if resp != nil {
+		if content, ok := resp["content"].(string); ok {
+			assistantMsg = content
+			_, err = s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model)
+			if err != nil {
+				// Log error but continue processing the response
+				log.Errorf("Failed to add assistant message for session %s: %v", clientReq.SessionID, err)
+			} else {
+				log.Debugf("Added assistant message to session %s", clientReq.SessionID)
+			}
+		} else {
+			log.Warnf("Llama response for session %s did not contain a string 'content' field.", clientReq.SessionID)
+		}
+	} else {
+		log.Warnf("Llama service returned nil response map for session %s.", clientReq.SessionID)
+		resp = make(map[string]interface{}) // Initialize if nil to avoid nil pointer below
+	}
+
+	// --- Update tokenized context in Redis (regardless of mode, as it uses DB history) ---
+	// This should happen *after* both user and assistant messages are added to the DB.
+	err = s.redisContextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
+	if err != nil {
+		// Log warning, similar to scenario mode, don't fail the request
+		log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, err)
+	} else {
+		log.Infof("Updated tokenized context for session %s", clientReq.SessionID)
+	}
+
+	// --- Add session_id, user_id, and mode to the response ---
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
 	resp["user_id"] = effectiveUserID        // Add the effective user_id used/provided
 	resp["mode"] = clientReq.Mode            // Add the mode used for the request
@@ -214,6 +255,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/completion", s.handleCompletion)
+	// TODO: Add handlers for session management (list, delete)
 	log.Infof("Starting server on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }
