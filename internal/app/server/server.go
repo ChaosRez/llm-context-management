@@ -89,29 +89,35 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 
 // handleCompletion handles requests to the /completion endpoint.
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
+	log.Infof("Received completion request from %s", r.RemoteAddr)
 	if r.Method != http.MethodPost {
+		log.Warnf("Invalid method %s received from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var clientReq CompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&clientReq); err != nil {
+		log.Errorf("Failed to decode request body from %s: %v", r.RemoteAddr, err)
 		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
+	log.Debugf("Decoded request: Mode=%s, SessionID=%s, Model=%s", clientReq.Mode, clientReq.SessionID, clientReq.Model)
 
 	// If no session_id, create one
 	if clientReq.SessionID == "" {
+		log.Info("No session_id provided, creating a new session.")
 		sessionID, err := s.sessionManager.CreateSession("auto", sessionDurationDays)
 		if err != nil {
+			log.Errorf("Failed to create session: %v", err)
 			http.Error(w, "Failed to create session", http.StatusInternalServerError)
 			return
 		}
 		clientReq.SessionID = sessionID
-		log.Infof("Created new session ID: %s", clientReq.SessionID) // Log the new session ID
+		log.Infof("Created new session ID: %s", clientReq.SessionID)
 	} else {
-		log.Infof("Using existing session ID: %s", clientReq.SessionID) // Log the provided session ID
+		log.Infof("Using existing session ID: %s", clientReq.SessionID)
 	}
 
 	llamaReq := make(map[string]interface{})
@@ -125,10 +131,11 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	for k, v := range clientReq.OtherParams {
 		llamaReq[k] = v
 	}
+	log.Debugf("Prepared Llama request parameters for session %s (excluding prompt/context)", clientReq.SessionID)
 
 	var err error
 	if clientReq.Mode == "raw" {
-		// Default history length for raw context retrieval
+		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
 		textContext, err := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
 		if err != nil {
 			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, err)
@@ -137,43 +144,58 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 		prompt := textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
 		llamaReq["prompt"] = prompt
+		log.Debugf("Prepared raw prompt for session %s", clientReq.SessionID)
 
 	} else if clientReq.Mode == "tokenized" {
+		log.Infof("Using 'tokenized' context retrieval for session %s", clientReq.SessionID)
 		tokenizedContext, err := s.redisContextStorage.GetTokenizedSessionContext(clientReq.SessionID)
 		if err != nil {
 			// Log error but proceed, context might not exist yet
 			log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, err)
+		} else if tokenizedContext != nil {
+			log.Debugf("Retrieved tokenized context for session %s", clientReq.SessionID)
+		} else {
+			log.Infof("No existing tokenized context found for session %s, proceeding without.", clientReq.SessionID)
 		}
+
 		llamaReq["prompt"] = clientReq.Prompt
 		// Add the retrieved tokenized context if available
 		if tokenizedContext != nil {
 			llamaReq["context"] = tokenizedContext // This key is added internally, not accepted from client
+			log.Debugf("Added tokenized context to Llama request for session %s", clientReq.SessionID)
 		}
 	} else {
+		log.Warnf("Invalid mode '%s' requested for session %s", clientReq.Mode, clientReq.SessionID)
 		http.Error(w, fmt.Sprintf("Invalid mode: %s. Use 'raw' or 'tokenized'", clientReq.Mode), http.StatusBadRequest)
 		return
 	}
 
 	// --- Call LlamaClient ---
+	log.Infof("Sending completion request to Llama service for session %s", clientReq.SessionID)
 	resp, err := s.llamaService.Completion(llamaReq)
 	if err != nil {
-		log.Errorf("Llama completion error: %v", err)
+		log.Errorf("Llama completion error for session %s: %v", clientReq.SessionID, err)
 		http.Error(w, "Error processing completion request", http.StatusInternalServerError)
 		return
 	}
+	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
 	// --- Add session_id to the response ---
 	// Ensure resp is not nil before adding the session ID
 	if resp == nil {
+		log.Warnf("Llama service returned nil response for session %s, initializing empty map.", clientReq.SessionID)
 		resp = make(map[string]interface{}) // Initialize if nil
 	}
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
+	log.Debugf("Added session_id %s to response map", clientReq.SessionID)
 
 	// --- Send response ---
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Errorf("Failed to write response: %v", err)
 		// Error already sent potentially, or response started. Log only.
+		log.Errorf("Failed to write response for session %s: %v", clientReq.SessionID, err)
+	} else {
+		log.Infof("Successfully sent completion response for session %s", clientReq.SessionID)
 	}
 }
 
