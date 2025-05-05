@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
 	SessionManager "llm-context-management/internal/app/session_manager"
@@ -45,7 +46,7 @@ type CompletionRequest struct {
 	OtherParams map[string]interface{} `json:"-"` // Catches other params for forwarding
 }
 
-// UnmarshalJSON custom unmarshaller to capture extra fields.
+// UnmarshalJSON custom unmarshaller to capture extra fields and disallow "context".
 func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 	type Alias CompletionRequest
 	aux := &struct {
@@ -56,19 +57,32 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 
 	// First, unmarshal known fields
 	if err := json.Unmarshal(data, &aux); err != nil {
+		// Check if the error is specifically about the "context" field if needed,
+		// but the map check below is more robust for catching it explicitly.
 		return err
 	}
 
-	// Then, unmarshal into a map to capture unknown fields
+	// Then, unmarshal into a map to capture unknown fields and check for disallowed keys
 	var allFields map[string]interface{}
 	if err := json.Unmarshal(data, &allFields); err != nil {
 		return err
 	}
 
-	// Only remove "mode"
-	delete(allFields, "mode")
+	// Check if the disallowed "context" key exists
+	if _, found := allFields["context"]; found {
+		return errors.New("the 'context' field is not allowed in the request body")
+	}
 
-	// Store remaining fields
+	// Remove known fields that are explicitly handled
+	delete(allFields, "mode")
+	delete(allFields, "session_id")
+	delete(allFields, "prompt")
+	delete(allFields, "model")
+	delete(allFields, "temperature")
+	delete(allFields, "seed")
+	delete(allFields, "stream")
+
+	// Store remaining fields as OtherParams
 	cr.OtherParams = allFields
 	return nil
 }
@@ -99,11 +113,12 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	llamaReq := make(map[string]interface{})
 
-	// Copy explicitly some and other parameters
+	// Copy explicitly known parameters
 	llamaReq["model"] = clientReq.Model
 	llamaReq["temperature"] = clientReq.Temperature
 	llamaReq["seed"] = clientReq.Seed
 	llamaReq["stream"] = clientReq.Stream
+	// Copy other parameters captured in OtherParams
 	for k, v := range clientReq.OtherParams {
 		llamaReq[k] = v
 	}
@@ -127,8 +142,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, err)
 		}
 		llamaReq["prompt"] = clientReq.Prompt
+		// Add the retrieved tokenized context if available
 		if tokenizedContext != nil {
-			llamaReq["context"] = tokenizedContext
+			llamaReq["context"] = tokenizedContext // This key is added internally, not accepted from client
 		}
 	} else {
 		http.Error(w, fmt.Sprintf("Invalid mode: %s. Use 'raw' or 'tokenized'", clientReq.Mode), http.StatusBadRequest)
