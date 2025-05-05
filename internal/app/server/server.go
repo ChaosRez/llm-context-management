@@ -13,6 +13,7 @@ import (
 
 const rawHistoryLength = 20
 const sessionDurationDays = 1
+const defaultUserID = "default_user" // Default user ID if none provided
 
 // Server holds dependencies for the HTTP server.
 type Server struct {
@@ -37,7 +38,8 @@ func NewServer(
 // CompletionRequest defines the expected structure of the incoming JSON request.
 type CompletionRequest struct {
 	Mode        string                 `json:"mode"` // "raw" or "tokenized"
-	SessionID   string                 `json:"session_id"`
+	SessionID   string                 `json:"session_id,omitempty"`
+	UserID      string                 `json:"user_id,omitempty"` // UserID field
 	Prompt      string                 `json:"prompt"`
 	Model       string                 `json:"model"`
 	Temperature float64                `json:"temperature"`
@@ -76,6 +78,7 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 	// Remove known fields that are explicitly handled
 	delete(allFields, "mode")
 	delete(allFields, "session_id")
+	delete(allFields, "user_id")
 	delete(allFields, "prompt")
 	delete(allFields, "model")
 	delete(allFields, "temperature")
@@ -103,21 +106,30 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	log.Debugf("Decoded request: Mode=%s, SessionID=%s, Model=%s", clientReq.Mode, clientReq.SessionID, clientReq.Model)
+	log.Debugf("Decoded request: Mode=%s, SessionID=%s, UserID=%s, Model=%s", clientReq.Mode, clientReq.SessionID, clientReq.UserID, clientReq.Model)
 
-	// If no session_id, create one
+	// Determine the effective UserID (from request or default)
+	effectiveUserID := clientReq.UserID
+	if effectiveUserID == "" {
+		effectiveUserID = defaultUserID
+		log.Warnf("No UserID provided in request, using default: %s", effectiveUserID)
+	}
+
+	// If no session_id, create one using the effective UserID
 	if clientReq.SessionID == "" {
-		log.Info("No session_id provided, creating a new session.")
-		sessionID, err := s.sessionManager.CreateSession("auto", sessionDurationDays)
+		log.Infof("No session_id provided, creating a new session for user '%s'.", effectiveUserID)
+		sessionID, err := s.sessionManager.CreateSession(effectiveUserID, sessionDurationDays) // Use effective userID
 		if err != nil {
-			log.Errorf("Failed to create session: %v", err)
+			log.Errorf("Failed to create session for user '%s': %v", effectiveUserID, err)
 			http.Error(w, "Failed to create session", http.StatusInternalServerError)
 			return
 		}
 		clientReq.SessionID = sessionID
-		log.Infof("Created new session ID: %s", clientReq.SessionID)
+		log.Infof("Created new session ID: %s for user %s", clientReq.SessionID, effectiveUserID)
 	} else {
-		log.Infof("Using existing session ID: %s", clientReq.SessionID)
+		// TODO: validate if the provided sessionID belongs to the effectiveUserID.
+		// For now, we just log the provided session ID and the effective UserID from the request/default.
+		log.Infof("Using existing session ID: %s (Effective UserID from request/default: %s)", clientReq.SessionID, effectiveUserID)
 	}
 
 	llamaReq := make(map[string]interface{})
@@ -180,14 +192,15 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
-	// --- Add session_id to the response ---
+	// --- Add session_id and user_id to the response ---
 	// Ensure resp is not nil before adding the session ID
 	if resp == nil {
 		log.Warnf("Llama service returned nil response for session %s, initializing empty map.", clientReq.SessionID)
 		resp = make(map[string]interface{}) // Initialize if nil
 	}
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
-	log.Debugf("Added session_id %s to response map", clientReq.SessionID)
+	resp["user_id"] = effectiveUserID        // Add the effective user_id used/provided
+	log.Debugf("Added session_id %s and user_id %s to response map", clientReq.SessionID, effectiveUserID)
 
 	// --- Send response ---
 	w.Header().Set("Content-Type", "application/json")
