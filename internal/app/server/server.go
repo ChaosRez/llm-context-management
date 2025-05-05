@@ -128,7 +128,6 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Infof("Created new session ID: %s for user %s", clientReq.SessionID, effectiveUserID)
 	} else {
 		// TODO: validate if the provided sessionID belongs to the effectiveUserID.
-		// For now, we just log the provided session ID and the effective UserID from the request/default.
 		log.Infof("Using existing session ID: %s (Effective UserID from request/default: %s)", clientReq.SessionID, effectiveUserID)
 	}
 

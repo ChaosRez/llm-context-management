@@ -17,6 +17,7 @@ func main() {
 	// --- Configuration ---
 	const runServerMode = false // false to run the interactive scenario mode (file).
 	const dbPath = "sessions.db"
+	const sessionDurationDays = 1
 	const llamaURL = "http://localhost:8080"
 	const redisAddr = "localhost:6379"
 	const serverListenAddr = ":8081"
@@ -46,7 +47,7 @@ func main() {
 		log.Infof("Using model: %s", scen.ModelName)
 
 		// Create a new session for the scenario
-		sessionID, err := sessionManager.CreateSession(scen.Name, 0)
+		sessionID, err := sessionManager.CreateSession(scen.Name, sessionDurationDays)
 		if err != nil {
 			log.Fatalf("Failed to create session: %v", err)
 		}
