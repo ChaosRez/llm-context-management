@@ -92,7 +92,7 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 
 // handleCompletion handles requests to the /completion endpoint.
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
-	log.Infof("Received completion request from %s", r.RemoteAddr)
+	log.Infof(">> Received completion request from %s <<", r.RemoteAddr)
 	if r.Method != http.MethodPost {
 		log.Warnf("Invalid method %s received from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)

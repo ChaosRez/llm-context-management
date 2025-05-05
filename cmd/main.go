@@ -16,7 +16,7 @@ import (
 // TODO fix the Payload keys for server
 func main() {
 	// --- Configuration ---
-	const runServerMode = false // false to run the interactive scenario mode (file).
+	const runServerMode = true // false to run the interactive scenario mode (file).
 	const dbPath = "sessions.db"
 	const sessionDurationDays = 1
 	const llamaURL = "http://localhost:8080"
