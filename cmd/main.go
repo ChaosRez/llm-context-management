@@ -10,6 +10,7 @@ import (
 	ContextStorage "llm-context-management/internal/pkg/context_storage"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
 	"os" // Needed for scenario mode
+	"strings"
 )
 
 // TODO fix the Payload keys for server
@@ -57,11 +58,18 @@ func main() {
 
 		// Interactive loop (from yaml)
 		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("Choose context retrieval for the entire scenario (raw/tokenized): ")
+		contextMethodInput, _ := reader.ReadString('\n')
+		contextMethod := strings.TrimSpace(contextMethodInput) // Trim whitespace and newline
+
+		if contextMethod != "raw" && contextMethod != "tokenized" {
+			log.Fatalf("Invalid context retrieval method: %s. Choose 'raw' or 'tokenized'.", contextMethod)
+		}
+		log.Infof("Using '%s' context retrieval method for this scenario.", contextMethod)
+
+		// Interactive loop (from yaml)
 		for _, message := range scen.Messages {
 			fmt.Printf("\nProcessing message: %s\n", message)
-			fmt.Print("Choose context retrieval (raw/tokenized): ")
-			input, _ := reader.ReadString('\n')
-			input = string([]byte(input[:len(input)-1])) // Trim newline
 
 			var req map[string]interface{}
 			var prompt string
@@ -69,7 +77,7 @@ func main() {
 			var tokenizedContext []int
 			var err error
 
-			if input == "raw" {
+			if contextMethod == "raw" {
 				const rawHistoryLength = 20 // Or make configurable
 				textContext, err = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength)
 				if err != nil {
@@ -83,7 +91,7 @@ func main() {
 					"seed":        123,
 					"stream":      false,
 				}
-			} else if input == "tokenized" {
+			} else { // contextMethod == "tokenized"
 				tokenizedContext, err = redisContextStorage.GetTokenizedSessionContext(sessionID)
 				// Allow proceeding even if context doesn't exist yet (first message)
 				if err != nil && err.Error() != "redis: nil" { // Check for specific redis nil error
@@ -105,8 +113,6 @@ func main() {
 				if tokenizedContext != nil {
 					req["context"] = tokenizedContext
 				}
-			} else {
-				log.Fatalf("Invalid context retrieval method: %s. Choose 'raw' or 'tokenized'.", input)
 			}
 
 			resp, err := llamaService.Completion(req)
@@ -132,9 +138,9 @@ func main() {
 				err = redisContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
 				if err != nil {
 					// Log warning instead of fatal, maybe allow continuation?
-					log.Warnf("Failed to update tokenized session context: %v", err)
+					log.Errorf("Failed to update tokenized session context: %v", err)
 				} else {
-					log.Debugf("Updated tokenized context for session %s", sessionID)
+					log.Infof("Updated tokenized context for session %s", sessionID)
 				}
 			} else {
 				log.Warn("Received nil or empty response content.")
@@ -145,9 +151,9 @@ func main() {
 		if sessionID != "" {
 			fmt.Print("Do you want to delete current session? (y/n): ")
 			input, _ := reader.ReadString('\n')
-			input = string([]byte(input)) // Keep newline for comparison
+			input = strings.ToLower(strings.TrimSpace(input)) // Normalize input
 			switch input {
-			case "y\n", "Y\n", "yes\n", "Yes\n":
+			case "y", "yes":
 				if err := sessionManager.DeleteSession(sessionID); err != nil {
 					log.Printf("Failed to delete session %s: %v", sessionID, err)
 				} else {
