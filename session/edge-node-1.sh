@@ -1,17 +1,22 @@
 #!/bin/bash
 
 set -x
+
+source ./config.sh
+EDGE_IP = $EDGE_IP_1
+ETCD_IP = $EDGE_IP_2
+
 # reza-node
        ./frednode \
         --nodeID frededge1 \
-        --nase-host "130.149.253.140:2379" \
+        --nase-host "$ETCD_IP:2379" \
         --nase-cached \
         --adaptor badgerdb \
         --badgerdb-path ./db \
         --host 0.0.0.0:9001 \
-        --advertise-host "130.149.253.178:9001" \
+        --advertise-host "$EDGE_IP:9001" \
         --peer-host 0.0.0.0:5555 \
-        --peer-advertise-host "130.149.253.178:5555" \
+        --peer-advertise-host "$EDGE_IP:5555" \
         --log-level debug \
         --handler dev \
         --cert cert/frededge1.crt \

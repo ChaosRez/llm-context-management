@@ -2,7 +2,7 @@
 
 # fake configurations...
 # 2 edge nodes - macs
-EDGE_IP_1="130.149.253.178" # Also etcd node
+EDGE_IP_1="130.149.253.178"
 EDGE_IP_2="130.149.253.140"
 
 

@@ -1,18 +1,20 @@
 #!/bin/bash
 
 set -x
+source ./config.sh
+EDGE_IP = $EDGE_IP_2
 
 # # minghe-node
         ./frednode \
         --nodeID frededge2 \
-        --nase-host "130.149.253.140:2379" \
+        --nase-host "$EDGE_IP:2379" \
         --nase-cached \
         --adaptor badgerdb \
         --badgerdb-path ./db \
         --host 0.0.0.0:9001 \
-        --advertise-host "130.149.253.140:9001" \
+        --advertise-host "$EDGE_IP:9001" \
         --peer-host 0.0.0.0:5555 \
-        --peer-advertise-host "130.149.253.140:5555" \
+        --peer-advertise-host "$EDGE_IP:5555" \
         --log-level debug \
         --handler dev \
         --cert cert/frededge2.crt \
