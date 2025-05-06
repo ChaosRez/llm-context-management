@@ -2,8 +2,8 @@
 
 # fake configurations...
 # 2 edge nodes - macs
-EDGE_IP_1="130.149.253.178"
-EDGE_IP_2="130.149.253.140"
+EDGE_IP_1="141.23.28.210"
+EDGE_IP_2="141.23.28.213"
 
 
 # instances(?)...
