@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
+	log "github.com/sirupsen/logrus"
 )
 
 type SQLiteSessionManager struct {
@@ -15,6 +16,10 @@ type SQLiteSessionManager struct {
 }
 
 func NewSQLiteSessionManager(dbPath string) *SQLiteSessionManager {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("NewSQLiteSessionManager took %v", time.Since(startTime))
+	}()
 	if dbPath == "" {
 		dbPath = "sessions.db"
 	}
@@ -28,6 +33,10 @@ func (mgr *SQLiteSessionManager) open() (*sql.DB, error) {
 }
 
 func (mgr *SQLiteSessionManager) initializeDB() {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("initializeDB took %v", time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		panic(err)
@@ -35,15 +44,18 @@ func (mgr *SQLiteSessionManager) initializeDB() {
 	defer db.Close()
 
 	// Users table
-	db.Exec(`CREATE TABLE IF NOT EXISTS users (
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		user_id TEXT PRIMARY KEY,
 		created_at INTEGER,
 		last_active INTEGER,
 		metadata TEXT
 	)`)
+	if err != nil {
+		log.Errorf("Failed to create users table: %v", err)
+	}
 
 	// Sessions table
-	db.Exec(`CREATE TABLE IF NOT EXISTS sessions (
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS sessions (
 		session_id TEXT PRIMARY KEY,
 		user_id TEXT,
 		created_at INTEGER,
@@ -51,9 +63,12 @@ func (mgr *SQLiteSessionManager) initializeDB() {
 		expires_at INTEGER,
 		FOREIGN KEY (user_id) REFERENCES users(user_id)
 	)`)
+	if err != nil {
+		log.Errorf("Failed to create sessions table: %v", err)
+	}
 
 	// Messages table
-	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS messages (
 		message_id TEXT PRIMARY KEY,
 		session_id TEXT,
 		role TEXT,
@@ -63,13 +78,26 @@ func (mgr *SQLiteSessionManager) initializeDB() {
 		timestamp INTEGER,
 		FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 	)`)
+	if err != nil {
+		log.Errorf("Failed to create messages table: %v", err)
+	}
 
 	// Indices
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)`)
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`)
+	if err != nil {
+		log.Errorf("Failed to create index idx_sessions_user_id: %v", err)
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)`)
+	if err != nil {
+		log.Errorf("Failed to create index idx_messages_session_id: %v", err)
+	}
 }
 
 func (mgr *SQLiteSessionManager) CreateUser(userID string, metadata map[string]interface{}) (string, error) {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("CreateUser for userID '%s' took %v", userID, time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		return "", err
@@ -96,10 +124,15 @@ func (mgr *SQLiteSessionManager) CreateUser(userID string, metadata map[string]i
 }
 
 func (mgr *SQLiteSessionManager) CreateSession(userID string, sessionDurationDays int) (string, error) {
+	startTime := time.Now()
+	var sessionID string // Declare sessionID here to use in defer
+	defer func() {
+		log.Debugf("CreateSession for userID '%s', sessionID '%s' took %v", userID, sessionID, time.Since(startTime))
+	}()
 	//if sessionDurationDays == 0 {
 	//	sessionDurationDays = 7
 	//}
-	sessionID := uuid.NewString()
+	sessionID = uuid.NewString() // Assign value to sessionID
 	now := time.Now().Unix()
 	expiresAt := now + int64(sessionDurationDays*24*60*60)
 
@@ -113,12 +146,11 @@ func (mgr *SQLiteSessionManager) CreateSession(userID string, sessionDurationDay
 	var exists int
 	err = db.QueryRow("SELECT 1 FROM users WHERE user_id = ?", userID).Scan(&exists)
 	if err == sql.ErrNoRows {
-		_, err = mgr.CreateUser(userID, nil)
-		if err != nil {
-			return "", err
+		if _, errUser := mgr.CreateUser(userID, nil); errUser != nil {
+			return "", errUser // Return specific error from CreateUser
 		}
-	} else if err != nil && err != sql.ErrNoRows {
-		return "", err
+	} else if err != nil {
+		return "", err // Return other query errors
 	}
 
 	_, err = db.Exec(
@@ -139,6 +171,10 @@ type SessionInfo struct {
 }
 
 func (mgr *SQLiteSessionManager) GetUserSessions(userID string) ([]SessionInfo, error) {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("GetUserSessions for userID '%s' took %v", userID, time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		return nil, err
@@ -172,6 +208,11 @@ func (mgr *SQLiteSessionManager) GetUserSessions(userID string) ([]SessionInfo, 
 }
 
 func (mgr *SQLiteSessionManager) AddMessage(sessionID, role, content string, tokens interface{}, model *string) (string, error) {
+	startTime := time.Now()
+	var messageID string // Declare messageID here to use in defer
+	defer func() {
+		log.Debugf("AddMessage for sessionID '%s', messageID '%s' took %v", sessionID, messageID, time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		return "", err
@@ -195,11 +236,16 @@ func (mgr *SQLiteSessionManager) AddMessage(sessionID, role, content string, tok
 	}
 
 	// Update session and user last_active
-	db.Exec("UPDATE sessions SET last_active = ? WHERE session_id = ?", now, sessionID)
-	db.Exec("UPDATE users SET last_active = ? WHERE user_id = ?", now, userID)
+	// timing them separately might be too verbose, but could be done if performance issues are suspected here.
+	if _, err := db.Exec("UPDATE sessions SET last_active = ? WHERE session_id = ?", now, sessionID); err != nil {
+		return "", fmt.Errorf("failed to update session last_active for sessionID %s: %v", sessionID, err)
+	}
+	if _, err := db.Exec("UPDATE users SET last_active = ? WHERE user_id = ?", now, userID); err != nil {
+		return "", fmt.Errorf("failed to update user last_active for userID %s: %v", userID, err)
+	}
 
 	// Add the message
-	messageID := uuid.NewString()
+	messageID = uuid.NewString()
 	var tokensStr *string
 	if tokens != nil {
 		tokBytes, _ := json.Marshal(tokens)
@@ -227,6 +273,10 @@ type MessageInfo struct {
 }
 
 func (mgr *SQLiteSessionManager) GetSessionMessages(sessionID string, limit int) ([]MessageInfo, error) {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("GetSessionMessages for sessionID '%s' with limit %d took %v", sessionID, limit, time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		return nil, err
@@ -244,7 +294,7 @@ func (mgr *SQLiteSessionManager) GetSessionMessages(sessionID string, limit int)
 
 	var messages []MessageInfo
 	for rows.Next() {
-		var mid, role, content, tokens sql.NullString
+		var mid, role, content, tokens sql.NullString // model is not selected
 		var ts int64
 		if err := rows.Scan(&mid, &role, &content, &tokens, &ts); err != nil {
 			return nil, err
@@ -262,6 +312,10 @@ func (mgr *SQLiteSessionManager) GetSessionMessages(sessionID string, limit int)
 
 // GetTextSessionContext returns formatted context for LLM inference using the specified format.
 func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMessages int) (string, error) {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("GetTextSessionContext for sessionID '%s' with maxMessages %d took %v", sessionID, maxMessages, time.Since(startTime))
+	}()
 	messages, err := mgr.GetSessionMessages(sessionID, maxMessages)
 	if err != nil {
 		return "", err
@@ -277,21 +331,31 @@ func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMess
 }
 
 func (mgr *SQLiteSessionManager) DeleteSession(sessionID string) error {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("DeleteSession for sessionID '%s' took %v", sessionID, time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	_, err = db.Exec("DELETE FROM messages WHERE session_id = ?", sessionID)
-	if err != nil {
-		return err
+	// TODO wrap these in a transaction for atomicity
+	// For timing, we are timing the whole operation.
+	if _, err := db.Exec("DELETE FROM messages WHERE session_id = ?", sessionID); err != nil {
+		return fmt.Errorf("failed to delete messages for sessionID %s during DeleteSession: %v", sessionID, err) // Return early if deleting messages fails
 	}
 	_, err = db.Exec("DELETE FROM sessions WHERE session_id = ?", sessionID)
 	return err
 }
 
 func (mgr *SQLiteSessionManager) CleanupExpiredSessions() (int, error) {
+	startTime := time.Now()
+	var sessionsDeleted int // To be used in the defer log
+	defer func() {
+		log.Debugf("CleanupExpiredSessions deleted %d sessions and took %v", sessionsDeleted, time.Since(startTime))
+	}()
 	db, err := mgr.open()
 	if err != nil {
 		return 0, err
@@ -313,12 +377,46 @@ func (mgr *SQLiteSessionManager) CleanupExpiredSessions() (int, error) {
 		}
 		expired = append(expired, sid)
 	}
+
+	sessionsDeleted = len(expired) // Assign the count before potential early return
+
+	// It's good practice to wrap these in a transaction for atomicity
+	// For timing, we are timing the whole operation.
+	// If atomicity is required, start a transaction here.
+	// tx, err := db.Begin()
+	// if err != nil {
+	// 	return 0, err
+	// }
+	// defer tx.Rollback() // Rollback if not committed
+
 	for _, sid := range expired {
-		db.Exec("DELETE FROM messages WHERE session_id = ?", sid)
+		// If using a transaction: _, err = tx.Exec(...)
+		if _, err := db.Exec("DELETE FROM messages WHERE session_id = ?", sid); err != nil {
+			// Log or return this specific error if needed
+
+			// TODO when returning, make sure to rollback the transaction if used.
+			return 0, fmt.Errorf("failed to delete messages for expired sessionID %s during cleanup: %v", sid, err)
+		}
 	}
+	// If using a transaction: result, err = tx.Exec(...)
 	_, err = db.Exec("DELETE FROM sessions WHERE expires_at < ?", now)
 	if err != nil {
+		// If using a transaction, tx.Rollback() would be called by defer
 		return 0, err
 	}
-	return len(expired), nil
+
+	// If using a transaction:
+	// if err = tx.Commit(); err != nil {
+	// 	return 0, err
+	// }
+
+	// The number of affected rows from the DELETE sessions query might be more accurate
+	// if some sessions had no messages or if there's a desire to confirm the DB operation.
+	// However, len(expired) reflects the number of sessions identified for deletion.
+	// For the exact number of rows deleted by the second EXEC:
+	// actualRowsDeleted, _ := result.RowsAffected()
+	// sessionsDeleted = int(actualRowsDeleted) // Update sessionsDeleted if using this
+
+	// sessionsDeleted is already set to len(expired)
+	return sessionsDeleted, nil
 }
