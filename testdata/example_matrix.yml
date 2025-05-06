@@ -1,6 +1,6 @@
 name: "Matrix Op"
 model_name: "Qwen/Qwen1.5-0.5B-Chat"
-user_id: "user123"
+user_id: "matrix_user"
 messages:
   - "How can I learn matrix operations?"
   - "can you explain more?"
