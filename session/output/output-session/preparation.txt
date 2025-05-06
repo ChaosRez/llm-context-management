@@ -1,0 +1,61 @@
++ source ./config.sh
+++ EDGE_IP_1=130.149.253.178
+++ EDGE_IP_2=130.149.253.140
+++ EDGE_INSTANCE_1=reza
+++ EDGE_INSTANCE_2=minghe
+++ EDGE_ID_1=edge_id_1
+++ EDGE_ID_2=edge_id_2
+++ CLIENT_IP=141.23.28.207
+++ CLIENT_INSTANCE=client_name
+++ CLIENT_ID=client_id
+++ CERTS_DIR=cert
+++ FReD_NODE=./frednode
++ EDGE_IP_1=130.149.253.178
++ EDGE_IP_2=130.149.253.140
++ EDGE_INSTANCE_1=reza
++ EDGE_INSTANCE_2=minghe
++ CLIENT_INSTANCE=client_name
++ CERTS_DIR=cert
++ FReD_NODE=./frednode
++ echo Configurations:
+Configurations:
++ echo 'EDGE_IP_1: 130.149.253.178'
+EDGE_IP_1: 130.149.253.178
++ echo 'EDGE_IP_2: 130.149.253.140'
+EDGE_IP_2: 130.149.253.140
++ echo 'CLIENT_IP: 141.23.28.207'
+CLIENT_IP: 141.23.28.207
++ echo 'EDGE_INSTANCE_1: reza'
+EDGE_INSTANCE_1: reza
++ echo 'EDGE_INSTANCE_2: minghe'
+EDGE_INSTANCE_2: minghe
++ echo 'CLIENT_INSTANCE: client_name'
+CLIENT_INSTANCE: client_name
++ echo 'The certificates are saved in: cert'
+The certificates are saved in: cert
++ mkdir -p cert
++ openssl genrsa -out cert/ca.key 2048
++ CA_CERT=cert/ca.crt
++ openssl req -x509 -new -nodes -key cert/ca.key -days 1825 -sha512 -out cert/ca.crt -subj /C=DE/L=Berlin/O=OpenFogStack/OU=tinyFaaS
++ ./gen-cert.sh cert etcd 130.149.253.140
+~/enoki/session/cert ~/enoki/session
+Certificate request self-signature ok
+subject=C=DE, L=Berlin, O=OpenFogStack, OU=tinyFaaS, CN=etcd
+~/enoki/session
++ ./gen-cert.sh cert frededge1 130.149.253.178
+~/enoki/session/cert ~/enoki/session
+Certificate request self-signature ok
+subject=C=DE, L=Berlin, O=OpenFogStack, OU=tinyFaaS, CN=frededge1
+~/enoki/session
++ ./gen-cert.sh cert frededge2 130.149.253.140
+~/enoki/session/cert ~/enoki/session
+Certificate request self-signature ok
+subject=C=DE, L=Berlin, O=OpenFogStack, OU=tinyFaaS, CN=frededge2
+~/enoki/session
++ ./gen-cert.sh cert alexandra 141.23.28.207
+~/enoki/session/cert ~/enoki/session
+Certificate request self-signature ok
+subject=C=DE, L=Berlin, O=OpenFogStack, OU=tinyFaaS, CN=alexandra
+~/enoki/session
++ set +x
+to destroy the machines run: terraform destroy -auto-approve

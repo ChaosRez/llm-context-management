@@ -1,21 +1,29 @@
 # config.sh
 
 # fake configurations...
-EDGE_IP_1="192.168.1.1"
-EDGE_IP_2="192.168.2.1"
+# 2 edge nodes - macs
+EDGE_IP_1="130.149.253.178" # Also etcd node
+EDGE_IP_2="130.149.253.140"
+
 
 # instances(?)...
-EDGE_INSTANCE_1 = 'edge_name_1'
-EDGE_INSTANCE_2 = 'edge_name_2'
+EDGE_INSTANCE_1="reza"
+EDGE_INSTANCE_2='minghe'
 
-# instances(?)...
-EDGE_ID_1 = 'edge_id_1'
-EDGE_ID_2 = 'edge_id_2'
+# ids...
+EDGE_ID_1='edge_id_1'
+EDGE_ID_2='edge_id_2'
 
-# client
-CLIENT_IP="192.168.1.2"
-CLIENT_INSTANCE = 'client_name'
-CLIENT_ID = 'client_id'
+# client - raspberry
+CLIENT_IP="141.23.28.207"
+CLIENT_INSTANCE='client_name'
+CLIENT_ID='client_id'
 
 # certificate dir
-CERTS_DIR='certs'
+CERTS_DIR='cert'
+
+# binary
+FReD_NODE='./frednode'
+
+
+
