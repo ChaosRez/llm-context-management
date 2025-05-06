@@ -92,7 +92,6 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 
 // handleCompletion handles requests to the /completion endpoint.
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
-	log.Infof(">> Received completion request from %s <<", r.RemoteAddr)
 	if r.Method != http.MethodPost {
 		log.Warnf("Invalid method %s received from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
@@ -106,6 +105,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+	log.Infof(">> Received completion request from %s '%s'<<", r.RemoteAddr, clientReq.Prompt)
 	log.Debugf("Decoded request: Mode=%s, SessionID=%s, UserID=%s, Model=%s", clientReq.Mode, clientReq.SessionID, clientReq.UserID, clientReq.Model)
 
 	// Determine the effective UserID (from request or default)
@@ -128,7 +128,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Infof("Created new session ID: %s for user %s", clientReq.SessionID, effectiveUserID)
 	} else {
 		// TODO: validate if the provided sessionID belongs to the effectiveUserID.
-		log.Infof("Using existing session ID: %s (Effective UserID from request/default: %s)", clientReq.SessionID, effectiveUserID)
+		log.Infof("Using existing session ID: %s (Effective UserID: %s)", clientReq.SessionID, effectiveUserID)
 	}
 
 	llamaReq := make(map[string]interface{})
@@ -166,7 +166,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, err)
 		} else if tokenizedContext != nil {
-			log.Debugf("Retrieved tokenized context for session %s", clientReq.SessionID)
+			log.Infof("Retrieved tokenized context for session %s", clientReq.SessionID)
 		} else {
 			log.Infof("No existing tokenized context found for session %s, proceeding without.", clientReq.SessionID)
 		}
