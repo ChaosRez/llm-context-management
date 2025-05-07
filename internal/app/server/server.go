@@ -9,6 +9,7 @@ import (
 	ContextStorage "llm-context-management/internal/pkg/context_storage"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
 	"net/http"
+	"time"
 )
 
 const rawHistoryLength = 20
@@ -92,6 +93,11 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 
 // handleCompletion handles requests to the /completion endpoint.
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
+	handleStartTime := time.Now()
+	defer func() {
+		log.Infof("handleCompletion for session %s took %s", r.Header.Get("X-Session-ID"), time.Since(handleStartTime)) // X-Session-ID will be set later if new
+	}()
+
 	if r.Method != http.MethodPost {
 		log.Warnf("Invalid method %s received from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
@@ -99,35 +105,47 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var clientReq CompletionRequest
+	decodeStartTime := time.Now()
 	if err := json.NewDecoder(r.Body).Decode(&clientReq); err != nil {
-		log.Errorf("Failed to decode request body from %s: %v", r.RemoteAddr, err)
+		log.Errorf("Failed to decode request body from %s: %v (took %s)", r.RemoteAddr, err, time.Since(decodeStartTime))
 		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
+	log.Debugf("Request body decoding took %s", time.Since(decodeStartTime))
 	defer r.Body.Close()
+
+	// Set X-Session-ID header for deferred log once clientReq.SessionID is determined
+	// This is a bit of a workaround as SessionID isn't known at the very start of the defer.
+	// A more robust way might involve a custom logger or passing sessionID to the defer.
+	// For now, we'll update a header that the defer can read.
+	// This is imperfect if session creation fails before this point.
+	r.Header.Set("X-Session-ID", clientReq.SessionID) // Initial set, might be updated
+
 	log.Infof(">> Received completion request from %s '%s'<<", r.RemoteAddr, clientReq.Prompt)
 	log.Debugf("Decoded request: Mode=%s, SessionID=%s, UserID=%s, Model=%s", clientReq.Mode, clientReq.SessionID, clientReq.UserID, clientReq.Model)
 
-	// Determine the effective UserID (from request or default)
 	effectiveUserID := clientReq.UserID
 	if effectiveUserID == "" {
 		effectiveUserID = defaultUserID
 		log.Warnf("No UserID provided in request, using default: %s", effectiveUserID)
 	}
 
-	// If no session_id, create one using the effective UserID
 	if clientReq.SessionID == "" {
 		log.Infof("No session_id provided, creating a new session for user '%s'.", effectiveUserID)
-		sessionID, err := s.sessionManager.CreateSession(effectiveUserID, sessionDurationDays) // Use effective userID
+		createSessStartTime := time.Now()
+		sessionID, err := s.sessionManager.CreateSession(effectiveUserID, sessionDurationDays)
+		log.Debugf("s.sessionManager.CreateSession for user '%s' took %s", effectiveUserID, time.Since(createSessStartTime))
 		if err != nil {
 			log.Errorf("Failed to create session for user '%s': %v", effectiveUserID, err)
 			http.Error(w, "Failed to create session", http.StatusInternalServerError)
 			return
 		}
 		clientReq.SessionID = sessionID
+		r.Header.Set("X-Session-ID", clientReq.SessionID) // Update for defer log
 		log.Infof("Created new session ID: %s for user %s", clientReq.SessionID, effectiveUserID)
 	} else {
 		// TODO: validate if the provided sessionID belongs to the effectiveUserID.
+		r.Header.Set("X-Session-ID", clientReq.SessionID) // Ensure it's set for defer log
 		log.Infof("Using existing session ID: %s (Effective UserID: %s)", clientReq.SessionID, effectiveUserID)
 	}
 
@@ -149,29 +167,32 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	if clientReq.Mode == "raw" {
 		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
-		textContext, err := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
-		if err != nil {
-			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, err)
+		getTextCtxStartTime := time.Now()
+		textContext, errCtx := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
+		log.Debugf("s.sessionManager.GetTextSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTextCtxStartTime))
+		if errCtx != nil {
+			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, errCtx)
 			http.Error(w, "Failed to retrieve session context", http.StatusInternalServerError)
 			return
 		}
-		// Construct the prompt including context and user message for Llama
+		// Construct the prompt including context and user message for Llama.cpp
 		finalPrompt = textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
 		llamaReq["prompt"] = finalPrompt
 		log.Debugf("Prepared raw prompt for session %s", clientReq.SessionID)
 
 	} else if clientReq.Mode == "tokenized" {
 		log.Infof("Using 'tokenized' context retrieval for session %s", clientReq.SessionID)
-		tokenizedContext, err := s.redisContextStorage.GetTokenizedSessionContext(clientReq.SessionID)
-		if err != nil {
-			log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, err)
+		getTokenCtxStartTime := time.Now()
+		tokenizedContext, errCtx := s.redisContextStorage.GetTokenizedSessionContext(clientReq.SessionID)
+		log.Debugf("s.redisContextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTokenCtxStartTime))
+		if errCtx != nil { // Note: GetTokenizedSessionContext already logs details internally
+			log.Warnf("Failed to get tokenized session context for %s (proceeding without, error: %v)", clientReq.SessionID, errCtx)
 		} else if tokenizedContext != nil {
-			log.Infof("Retrieved tokenized context for session %s", clientReq.SessionID)
+			log.Infof("Retrieved tokenized context (length %d) for session %s", len(tokenizedContext), clientReq.SessionID)
 		} else {
 			log.Infof("No existing tokenized context found for session %s, proceeding without.", clientReq.SessionID)
 		}
 
-		// The prompt sent to Llama is just the user's message in tokenized mode
 		finalPrompt = clientReq.Prompt
 		llamaReq["prompt"] = finalPrompt
 		// Add the retrieved tokenized context if available
@@ -187,7 +208,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	// --- Call LlamaClient ---
 	log.Infof("Sending completion request to Llama service for session %s", clientReq.SessionID)
-	resp, err := s.llamaService.Completion(llamaReq)
+	llamaCallStartTime := time.Now()
+	resp, err := s.llamaService.Completion(llamaReq) // llamaService.Completion has internal timing
+	log.Debugf("s.llamaService.Completion call for session %s took %s (overall)", clientReq.SessionID, time.Since(llamaCallStartTime))
 	if err != nil {
 		log.Errorf("Llama completion error for session %s: %v", clientReq.SessionID, err)
 		http.Error(w, "Error processing completion request", http.StatusInternalServerError)
@@ -195,11 +218,13 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
+	addUserMsgStartTime := time.Now()
 	// --- Add user message to session history ---
 	// Note: We add the *original* user prompt (clientReq.Prompt), not the potentially context-prepended one (finalPrompt)
 	_, err = s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model)
+	log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, time.Since(addUserMsgStartTime))
 	if err != nil {
-		// Log error but continue processing the response
+		// NOTE Log error but continue processing the response
 		log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
 	} else {
 		log.Debugf("Added user message to session %s", clientReq.SessionID)
@@ -210,9 +235,11 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	if resp != nil {
 		if content, ok := resp["content"].(string); ok {
 			assistantMsg = content
+			addAssistantMsgStartTime := time.Now()
 			_, err = s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model)
+			log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, time.Since(addAssistantMsgStartTime))
 			if err != nil {
-				// Log error but continue processing the response
+				// NOTE Log error but continue processing the response
 				log.Errorf("Failed to add assistant message for session %s: %v", clientReq.SessionID, err)
 			} else {
 				log.Debugf("Added assistant message to session %s", clientReq.SessionID)
@@ -227,7 +254,10 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	// --- Update tokenized context in Redis (regardless of mode, as it uses DB history) ---
 	// This should happen *after* both user and assistant messages are added to the DB.
+	updateCtxStartTime := time.Now()
 	err = s.redisContextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
+	// UpdateSessionContext has internal detailed timing, log overall here
+	log.Debugf("s.redisContextStorage.UpdateSessionContext (overall) for session %s took %s", clientReq.SessionID, time.Since(updateCtxStartTime))
 	if err != nil {
 		// Log warning, similar to scenario mode, don't fail the request
 		log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, err)
@@ -243,11 +273,12 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	// --- Send response ---
 	w.Header().Set("Content-Type", "application/json")
+	encodeStartTime := time.Now()
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		// Error already sent potentially, or response started. Log only.
-		log.Errorf("Failed to write response for session %s: %v", clientReq.SessionID, err)
+		log.Errorf("Failed to write response for session %s: %v (took %s)", clientReq.SessionID, err, time.Since(encodeStartTime))
 	} else {
-		log.Infof("Successfully sent completion response for session %s", clientReq.SessionID)
+		log.Infof("Successfully sent completion response for session %s (encoding took %s)", clientReq.SessionID, time.Since(encodeStartTime))
 	}
 }
 
