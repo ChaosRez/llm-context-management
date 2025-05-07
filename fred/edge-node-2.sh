@@ -2,7 +2,7 @@
 
 set -x
 source ./config.sh
-EDGE_IP = $EDGE_IP_2
+EDGE_IP=$EDGE_IP_2
 
 # # minghe-node
         ./frednode \
