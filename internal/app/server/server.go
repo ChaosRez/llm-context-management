@@ -18,21 +18,21 @@ const defaultUserID = "default_user" // Default user ID if none provided
 
 // Server holds dependencies for the HTTP server.
 type Server struct {
-	llamaService        *Llama.LlamaClient
-	sessionManager      *SessionManager.SQLiteSessionManager // NOTE Assuming SQLite
-	redisContextStorage *ContextStorage.RedisContextStorage
+	llamaService   *Llama.LlamaClient
+	sessionManager *SessionManager.SQLiteSessionManager // NOTE Assuming SQLite
+	contextStorage ContextStorage.ContextStorage
 }
 
 // NewServer creates a new Server instance.
 func NewServer(
 	llama *Llama.LlamaClient,
 	sm *SessionManager.SQLiteSessionManager,
-	cs *ContextStorage.RedisContextStorage,
+	cs ContextStorage.ContextStorage,
 ) *Server {
 	return &Server{
-		llamaService:        llama,
-		sessionManager:      sm,
-		redisContextStorage: cs,
+		llamaService:   llama,
+		sessionManager: sm,
+		contextStorage: cs,
 	}
 }
 
@@ -183,8 +183,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	} else if clientReq.Mode == "tokenized" {
 		log.Infof("Using 'tokenized' context retrieval for session %s", clientReq.SessionID)
 		getTokenCtxStartTime := time.Now()
-		tokenizedContext, errCtx := s.redisContextStorage.GetTokenizedSessionContext(clientReq.SessionID)
-		log.Debugf("s.redisContextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTokenCtxStartTime))
+		tokenizedContext, errCtx := s.contextStorage.GetTokenizedSessionContext(clientReq.SessionID)
+		log.Debugf("s.contextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTokenCtxStartTime))
 		if errCtx != nil { // Note: GetTokenizedSessionContext already logs details internally
 			log.Warnf("Failed to get tokenized session context for %s (proceeding without, error: %v)", clientReq.SessionID, errCtx)
 		} else if tokenizedContext != nil {
@@ -255,9 +255,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	// --- Update tokenized context in Redis (regardless of mode, as it uses DB history) ---
 	// This should happen *after* both user and assistant messages are added to the DB.
 	updateCtxStartTime := time.Now()
-	err = s.redisContextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
+	err = s.contextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
 	// UpdateSessionContext has internal detailed timing, log overall here
-	log.Debugf("s.redisContextStorage.UpdateSessionContext (overall) for session %s took %s", clientReq.SessionID, time.Since(updateCtxStartTime))
+	log.Debugf("s.contextStorage.UpdateSessionContext (overall) for session %s took %s", clientReq.SessionID, time.Since(updateCtxStartTime))
 	if err != nil {
 		// Log warning, similar to scenario mode, don't fail the request
 		log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, err)

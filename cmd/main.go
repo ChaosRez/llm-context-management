@@ -24,18 +24,31 @@ func main() {
 	const sessionDurationDays = 1
 	const llamaURL = "http://localhost:8080"
 	const redisAddr = "localhost:6379"
+	// const redisAddr = "localhost:6379"
+	const fredAddr = "127.0.0.1:10000" // FIXME:
+	const fredKeygroup = "llm_sessions_main"
+	const fredUseStrongConsistency = false // consistency setting
+	const fredCreateKeygroup = true        // Attempt to create keygroup if not exists
+	const fredBootstrapNode = "nodeA"      // FIXME Node to use for keygroup creation
 	const serverListenAddr = ":8081"
 	const scenarioFilePath = "testdata/example_ruby.yml" // only in scenario mode
 
 	// --- Initialize common services ---
 	sessionManager := SessionManager.NewSQLiteSessionManager(dbPath)
 	llamaService := Llama.NewLlamaClient(llamaURL)
-	redisContextStorage := ContextStorage.NewRedisContextStorage(redisAddr, "", 0)
+	//redisContextStorage := ContextStorage.NewRedisContextStorage(redisAddr, "", 0)
+
+	// Initialize FReDContextStorage
+	fredContextStorage, err := ContextStorage.NewFReDContextStorage(fredAddr, fredKeygroup, fredUseStrongConsistency, fredCreateKeygroup, fredBootstrapNode)
+	if err != nil {
+		log.Fatalf("Failed to initialize FReDContextStorage: %v", err)
+	}
+	log.Info("Successfully initialized FReDContextStorage.")
 
 	if runServerMode {
 		// --- Server Mode ---
 		log.Info("Starting in Server Mode...")
-		srv := Server.NewServer(llamaService, sessionManager, redisContextStorage)
+		srv := Server.NewServer(llamaService, sessionManager, fredContextStorage) // redisContextStorage
 		log.Fatal(srv.Start(serverListenAddr))
 
 	} else {
@@ -44,9 +57,9 @@ func main() {
 
 		// Load scenario from YAML
 		loadScenStartTime := time.Now()
-		scen, err := Scenario.LoadScenario(scenarioFilePath)
-		if err != nil {
-			log.Fatalf("Failed to load scenario '%s': %v", scenarioFilePath, err)
+		scen, errScenario := Scenario.LoadScenario(scenarioFilePath)
+		if errScenario != nil {
+			log.Fatalf("Failed to load scenario '%s': %v", scenarioFilePath, errScenario)
 		}
 		log.Infof("Scenario.LoadScenario took %v", time.Since(loadScenStartTime))
 		log.Infof("Loaded scenario: %s", scen.Name)
@@ -54,9 +67,9 @@ func main() {
 
 		// Create a new session for the scenario
 		createSessStartTime := time.Now()
-		sessionID, err := sessionManager.CreateSession(scen.UserID, sessionDurationDays)
-		if err != nil {
-			log.Fatalf("Failed to create session: %v", err)
+		sessionID, errSession := sessionManager.CreateSession(scen.UserID, sessionDurationDays)
+		if errSession != nil {
+			log.Fatalf("Failed to create session: %v", errSession)
 		}
 		log.Infof("sessionManager.CreateSession took %v", time.Since(createSessStartTime))
 		log.Infof("Created session ID: %s", sessionID)
@@ -82,16 +95,16 @@ func main() {
 			var prompt string
 			var textContext string
 			var tokenizedContext []int
-			var err error
+			var errCtx error
 			var opStartTime time.Time
 
 			if contextMethod == "raw" {
 				const rawHistoryLength = 20 // Or make configurable
 				opStartTime = time.Now()
-				textContext, err = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength)
+				textContext, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength)
 				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", time.Since(opStartTime))
-				if err != nil {
-					log.Fatalf("Failed to get raw session context: %v", err)
+				if errCtx != nil {
+					log.Fatalf("Failed to get raw session context: %v", errCtx)
 				}
 				prompt = textContext + "<|im_start|>user\n" + message + "<|im_end|>\n"
 				req = map[string]interface{}{
@@ -103,12 +116,12 @@ func main() {
 				}
 			} else { // contextMethod == "tokenized"
 				opStartTime = time.Now()
-				tokenizedContext, err = redisContextStorage.GetTokenizedSessionContext(sessionID)
-				log.Infof("redisContextStorage.GetTokenizedSessionContext took %v", time.Since(opStartTime))
+				tokenizedContext, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
+				log.Infof("fredContextStorage.GetTokenizedSessionContext took %v", time.Since(opStartTime))
 				// Allow proceeding even if context doesn't exist yet (first message)
-				if err != nil && err.Error() != "redis: nil" { // Check for specific redis nil error
-					log.Warnf("Failed to get tokenized session context (proceeding without): %v", err)
-				} else if err == nil && tokenizedContext != nil {
+				if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
+					log.Warnf("Failed to get tokenized session context (proceeding without): %v", errCtx)
+				} else if errCtx == nil && tokenizedContext != nil {
 					log.Debugf("Retrieved tokenized context for session %s", sessionID)
 				} else {
 					log.Infof("No existing tokenized context found for session %s, proceeding without.", sessionID)
@@ -128,17 +141,17 @@ func main() {
 			}
 
 			opStartTime = time.Now()
-			resp, err := llamaService.Completion(req)
+			resp, errCompletion := llamaService.Completion(req)
 			log.Infof("llamaService.Completion took %v", time.Since(opStartTime))
-			if err != nil {
-				log.Fatalf("Completion error: %v", err)
+			if errCompletion != nil {
+				log.Fatalf("Completion error: %v", errCompletion)
 			}
 
 			opStartTime = time.Now()
-			_, err = sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
+			_, errAddMsg := sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
 			log.Infof("sessionManager.AddMessage (user) took %v", time.Since(opStartTime))
-			if err != nil {
-				log.Errorf("Failed to add user message: %v", err)
+			if errAddMsg != nil {
+				log.Errorf("Failed to add user message: %v", errAddMsg)
 			}
 
 			// Process and add assistant response to session
@@ -146,19 +159,19 @@ func main() {
 				assistantMsg := fmt.Sprintf("%v", resp["content"])
 				fmt.Printf("Response: \n%s\n", assistantMsg)
 				opStartTime = time.Now()
-				_, err = sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
+				_, errAddMsg = sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
 				log.Infof("sessionManager.AddMessage (assistant) took %v", time.Since(opStartTime))
-				if err != nil {
-					log.Errorf("Failed to add assistant message: %v", err)
+				if errAddMsg != nil {
+					log.Errorf("Failed to add assistant message: %v", errAddMsg)
 				}
 
-				// Update tokenized context in Redis *after* adding both messages
+				// Update tokenized context in context store *after* adding both messages
 				opStartTime = time.Now()
-				err = redisContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
-				log.Infof("redisContextStorage.UpdateSessionContext took %v", time.Since(opStartTime))
-				if err != nil {
+				errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
+				log.Infof("fredContextStorage.UpdateSessionContext took %v", time.Since(opStartTime))
+				if errUpdateCtx != nil {
 					// Log warning instead of fatal, maybe allow continuation?
-					log.Errorf("Failed to update tokenized session context: %v", err)
+					log.Errorf("Failed to update tokenized session context: %v", errUpdateCtx)
 				} else {
 					log.Infof("Updated tokenized context for session %s", sessionID)
 				}
@@ -175,18 +188,18 @@ func main() {
 			switch input {
 			case "y", "yes":
 				delSessStartTime := time.Now()
-				if err := sessionManager.DeleteSession(sessionID); err != nil {
-					log.Printf("Failed to delete session %s: %v", sessionID, err)
+				if errDelSess := sessionManager.DeleteSession(sessionID); errDelSess != nil {
+					log.Printf("Failed to delete session %s: %v", sessionID, errDelSess)
 				} else {
 					log.Debugf("sessionManager.DeleteSession took %v", time.Since(delSessStartTime))
 					log.Printf("Deleted session %s.", sessionID)
 				}
 				delCtxStartTime := time.Now()
-				if err := redisContextStorage.DeleteSessionContext(sessionID); err != nil {
-					log.Printf("Failed to delete Redis context for session %s: %v", sessionID, err)
+				if errDelCtx := fredContextStorage.DeleteSessionContext(sessionID); errDelCtx != nil {
+					log.Printf("Failed to delete FReD context for session %s: %v", sessionID, errDelCtx)
 				} else {
-					log.Debugf("redisContextStorage.DeleteSessionContext took %v", time.Since(delCtxStartTime))
-					log.Printf("Deleted Redis context for session %s.", sessionID)
+					log.Debugf("fredContextStorage.DeleteSessionContext took %v", time.Since(delCtxStartTime))
+					log.Printf("Deleted FReD context for session %s.", sessionID)
 				}
 			default:
 				log.Printf("Session %s NOT deleted.", sessionID)
