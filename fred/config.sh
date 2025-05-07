@@ -8,7 +8,7 @@ EDGE_IP_2="141.23.28.213"
 
 # instances(?)...
 EDGE_INSTANCE_1="reza"
-EDGE_INSTANCE_2='minghe'
+EDGE_INSTANCE_2="minghe"
 
 # ids...
 EDGE_ID_1='edge_id_1'
