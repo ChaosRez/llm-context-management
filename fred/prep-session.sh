@@ -9,6 +9,8 @@ EDGE_IP_2=$EDGE_IP_2
 EDGE_INSTANCE_1=$EDGE_INSTANCE_1
 EDGE_INSTANCE_2=$EDGE_INSTANCE_2
 
+JETSON_IP=$JETSON_IP
+
 CLIENT_INSTANCE=$CLIENT_INSTANCE
 CERTS_DIR=$CERTS_DIR
 FReD_NODE=$FReD_NODE
@@ -30,11 +32,14 @@ CA_CERT="$CERTS_DIR/ca.crt"
 # openssl req -x509 -new -nodes -key "$CERTS_DIR/ca.key" -days 1825 -sha512 -out "$CA_CERT" -subj "/C=DE/L=Berlin/O=OpenFogStack/OU=enoki"
 openssl req -x509 -new -nodes -key "$CERTS_DIR/ca.key" -days 1825 -sha512 -out "$CA_CERT" -subj "/C=DE/L=Berlin/O=OpenFogStack/OU=tinyFaaS"
 
-./gen-cert.sh "$CERTS_DIR" etcd "$EDGE_IP_2"
+# ./gen-cert.sh "$CERTS_DIR" etcd "$EDGE_IP_2"
+
 ./gen-cert.sh "$CERTS_DIR" frededge1 "$EDGE_IP_1"
 ./gen-cert.sh "$CERTS_DIR" frededge2 "$EDGE_IP_2"
 
-./gen-cert.sh "$CERTS_DIR" alexandra "$CLIENT_IP"
+./gen-cert.sh "$CERTS_DIR" fredjetson "$JETSON_IP"
+
+# ./gen-cert.sh "$CERTS_DIR" alexandra "$EDGE_IP_2"
 
 
 # copy the certificate to edge instance

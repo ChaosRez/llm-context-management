@@ -4,7 +4,7 @@ set -x
 source ./config.sh
 EDGE_IP=$EDGE_IP_2
 
-# # minghe-node
+# # minghe-node--ETCD Node
         ./frednode \
         --nodeID frededge2 \
         --nase-host "$EDGE_IP:2379" \

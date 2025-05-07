@@ -8,10 +8,10 @@ EDGE_IP_2=$EDGE_IP_2
     --address "$EDGE_IP_2:10000" \
     --lighthouse :9001 \
     --ca-cert cert/ca.crt \
-    --alexandra-key cert/alexandra.key \
-    --clients-key cert/alexandra.key \
-    --alexandra-cert cert/alexandra.crt \
-    --clients-cert cert/alexandra.crt \
+    --alexandra-key cert/frededge2.key \
+    --clients-key cert/frededge2.key \
+    --alexandra-cert cert/frededge2.crt \
+    --clients-cert cert/frededge2.crt \
     --experimental
 
 set +x

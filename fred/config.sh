@@ -2,9 +2,9 @@
 
 # fake configurations...
 # 2 edge nodes - macs
+# currently, we use EDGE_IP_2 as ETCD
 EDGE_IP_1="141.23.28.210"
 EDGE_IP_2="141.23.28.213"
-
 
 # instances(?)...
 EDGE_INSTANCE_1="reza"
@@ -24,6 +24,6 @@ CERTS_DIR='cert'
 
 # binary
 FReD_NODE='./frednode'
-
+JETSON_IP='141.23.28.212'
 
 
