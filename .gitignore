@@ -1,3 +1,4 @@
 .idea
 go.sum
 sessions.db
+fred/db/*
