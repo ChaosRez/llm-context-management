@@ -1,9 +1,12 @@
 package session_manager
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -105,7 +108,7 @@ func (mgr *SQLiteSessionManager) CreateUser(userID string, metadata map[string]i
 	defer db.Close()
 
 	if userID == "" {
-		userID = uuid.NewString()
+		userID = mgr.generateShortID()
 	}
 	if metadata == nil {
 		metadata = map[string]interface{}{}
@@ -132,7 +135,7 @@ func (mgr *SQLiteSessionManager) CreateSession(userID string, sessionDurationDay
 	//if sessionDurationDays == 0 {
 	//	sessionDurationDays = 7
 	//}
-	sessionID = uuid.NewString() // Assign value to sessionID
+	sessionID = mgr.generateShortID()
 	now := time.Now().Unix()
 	expiresAt := now + int64(sessionDurationDays*24*60*60)
 
@@ -245,7 +248,7 @@ func (mgr *SQLiteSessionManager) AddMessage(sessionID, role, content string, tok
 	}
 
 	// Add the message
-	messageID = uuid.NewString()
+	messageID = mgr.generateShortID()
 	var tokensStr *string
 	if tokens != nil {
 		tokBytes, _ := json.Marshal(tokens)
@@ -419,4 +422,20 @@ func (mgr *SQLiteSessionManager) CleanupExpiredSessions() (int, error) {
 
 	// sessionsDeleted is already set to len(expired)
 	return sessionsDeleted, nil
+}
+
+// generateShortID creates a shorter, non-dash-separated unique ID
+func (mgr *SQLiteSessionManager) generateShortID() string {
+	// Generate 8 random bytes (will result in 16-char hex string)
+	b := make([]byte, 8)
+	_, err := rand.Read(b)
+	if err != nil {
+		// Fallback to uuid with dashes removed if random generation fails
+		log.Warnf("Failed to generate random bytes: %v, falling back to uuid", err)
+		return strings.ReplaceAll(uuid.NewString(), "-", "")[0:16]
+	}
+
+	// Convert to hexadecimal (no dashes or special chars)
+	id := hex.EncodeToString(b)
+	return id
 }
