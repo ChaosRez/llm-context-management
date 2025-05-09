@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"git.tu-berlin.de/mcc-fred/fred/proto/middleware"
-	"github.com/rs/zerolog/log"
+	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -20,7 +20,7 @@ type AlexandraClient struct {
 func NewAlexandraClient(address, clientCertPath, clientKeyPath, caCertPath string) AlexandraClient {
 	cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Cannot load client certificates")
+		log.WithError(err).Fatal("Cannot load client certificates")
 		return AlexandraClient{}
 	}
 
@@ -28,10 +28,10 @@ func NewAlexandraClient(address, clientCertPath, clientKeyPath, caCertPath strin
 	rootCAs := x509.NewCertPool()
 	loaded, err := os.ReadFile(caCertPath)
 	if err != nil {
-		log.Fatal().Msgf("Cannot read CA certificate file: %v", err)
+		log.Fatalf("Cannot read CA certificate file: %v", err)
 	}
 	if !rootCAs.AppendCertsFromPEM(loaded) {
-		log.Fatal().Msg("Failed to append CA certificate to the pool")
+		log.Fatal("Failed to append CA certificate to the pool")
 	}
 
 	tlsConfig := &tls.Config{
@@ -45,7 +45,7 @@ func NewAlexandraClient(address, clientCertPath, clientKeyPath, caCertPath strin
 	// Establish a gRPC connection
 	conn, err := grpc.Dial(address, grpc.WithTransportCredentials(tc))
 	if err != nil {
-		log.Fatal().Err(err).Msg("Cannot create gRPC connection")
+		log.WithError(err).Fatal("Cannot create gRPC connection")
 		return AlexandraClient{}
 	}
 
@@ -58,15 +58,15 @@ func NewAlexandraClient(address, clientCertPath, clientKeyPath, caCertPath strin
 func (c *AlexandraClient) dealWithResponse(operation string, err error, expectError bool) {
 	// Got error but expected none
 	if err != nil && !expectError {
-		log.Fatal().Err(err).Msgf("%s got Error but expected no error", operation)
+		log.WithError(err).Fatalf("%s got Error but expected no error", operation)
 	} else if err == nil && expectError {
 		// Got no error but expected error
-		log.Fatal().Msgf("%s got no error but expected an error", operation)
+		log.Fatalf("%s got no error but expected an error", operation)
 	}
 }
 
 func (c *AlexandraClient) CreateKeygroup(firstNodeID string, kgname string, mutable bool, expiry int64, expectError bool) {
-	log.Debug().Msgf("CreateKeygroup: %s, %s, %t, %d", firstNodeID, kgname, mutable, expiry)
+	log.Debugf("CreateKeygroup: %s, %s, %t, %d", firstNodeID, kgname, mutable, expiry)
 	_, err := c.client.CreateKeygroup(context.Background(), &middleware.CreateKeygroupRequest{
 		Keygroup:    kgname,
 		Mutable:     mutable,
@@ -78,7 +78,7 @@ func (c *AlexandraClient) CreateKeygroup(firstNodeID string, kgname string, muta
 }
 
 func (c *AlexandraClient) Update(kgname, id, data string, expectError bool) {
-	log.Debug().Msgf("Update: %s, %s, %s", kgname, id, data)
+	log.Debugf("Update: %s, %s, %s", kgname, id, data)
 	_, err := c.client.Update(context.Background(), &middleware.UpdateRequest{
 		Keygroup: kgname,
 		Id:       id,
@@ -88,7 +88,7 @@ func (c *AlexandraClient) Update(kgname, id, data string, expectError bool) {
 }
 
 func (c *AlexandraClient) Read(keygroup, id string, minExpiry int64, expectError bool) []string {
-	log.Debug().Msgf("Read: %s, %s, %d", keygroup, id, minExpiry)
+	log.Debugf("Read: %s, %s, %d", keygroup, id, minExpiry)
 
 	res, err := c.client.Read(context.Background(), &middleware.ReadRequest{
 		Keygroup:  keygroup,
@@ -112,7 +112,7 @@ func (c *AlexandraClient) Read(keygroup, id string, minExpiry int64, expectError
 }
 
 func (c *AlexandraClient) AddKeygroupReplica(keygroup, node string, expiry int64, expectError bool) {
-	log.Debug().Msgf("AddKeygroupReplica: %s, %s, %d", keygroup, node, expiry)
+	log.Debugf("AddKeygroupReplica: %s, %s, %d", keygroup, node, expiry)
 	_, err := c.client.AddReplica(context.Background(), &middleware.AddReplicaRequest{
 		Keygroup: keygroup,
 		NodeId:   node,
