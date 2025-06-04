@@ -19,6 +19,8 @@ const (
 	defaultFredKeygroup      = "llm_session_contexts"
 	maxMessagesForFredUpdate = 10000 // Similar to Redis implementation
 	defaultFredReadTimeout   = 500   // Default timeout for FReD read operations in ms
+	expiry                   = 0     // 0 = no expiry time for FReD keygroup upon creation
+	mutable                  = true
 )
 
 // ErrFredNotFound is returned when a key is not found in FReD.
@@ -26,9 +28,8 @@ var ErrFredNotFound = fmt.Errorf("key not found in FReD")
 
 // FReDContextStorage implements the ContextStorage interface using FReD.
 type FReDContextStorage struct {
-	client    *fredClient.AlexandraClient
-	keygroup  string
-	useStrong bool // Flag for strong consistency, defaults to false
+	client   *fredClient.AlexandraClient
+	keygroup string
 }
 
 // NewFReDContextStorage creates a new FReDContextStorage.
@@ -36,10 +37,10 @@ type FReDContextStorage struct {
 // keygroup is the FReD keygroup to use. If empty, defaultFredKeygroup is used.
 // createKeygroupIfNotExist will attempt to create the keygroup on a specified node if it doesn't exist.
 // bootstrapNode is the node used to create the keygroup (e.g., "nodeA"). Required if createKeygroupIfNotExist is true.
-func NewFReDContextStorage(addr string, keygroup string, useStrong bool, createKeygroupIfNotExist bool, bootstrapNode string) (*FReDContextStorage, error) {
+func NewFReDContextStorage(addr string, keygroup string, createKeygroupIfNotExist bool, bootstrapNode string) (*FReDContextStorage, error) {
 	// Define relative paths for certificates and keys
 	certDir := "fred/cert/"
-	clientCertPath := filepath.Join(certDir, "frededge1.crt")
+	clientCertPath := filepath.Join(certDir, "frededge1.crt") // FIXME: diffrent certs for different nodes
 	clientKeyPath := filepath.Join(certDir, "frededge1.key")
 	caCertPath := filepath.Join(certDir, "ca.crt")
 
@@ -56,14 +57,13 @@ func NewFReDContextStorage(addr string, keygroup string, useStrong bool, createK
 			return nil, fmt.Errorf("bootstrapNode is required when createKeygroupIfNotExist is true")
 		}
 		log.Infof("FReD: Attempting to create keygroup '%s' on node '%s'", storageKeygroup, bootstrapNode)
-		c.CreateKeygroup(bootstrapNode, storageKeygroup, true, 0, false) // Assuming 0 means no expiry or default
+		c.CreateKeygroup(bootstrapNode, storageKeygroup, mutable, expiry, true)
 		log.Infof("FReD: Keygroup '%s' creation initiated (or already exists).", storageKeygroup)
 	}
 
 	return &FReDContextStorage{
-		client:    &c,
-		keygroup:  storageKeygroup,
-		useStrong: useStrong,
+		client:   &c,
+		keygroup: storageKeygroup,
 	}, nil
 }
 
@@ -77,7 +77,7 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 	log.Infof("FReD: Attempting to retrieve tokenized context for session ID: %s from keygroup: %s", sessionID, f.keygroup)
 
 	fredReadStartTime := time.Now()
-	readData := f.client.Read(f.keygroup, sessionID, defaultFredReadTimeout, f.useStrong)
+	readData := f.client.Read(f.keygroup, sessionID, defaultFredReadTimeout)
 	log.Debugf("FReD: Read for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredReadStartTime))
 
 	if len(readData) == 0 {
@@ -156,7 +156,7 @@ func (f *FReDContextStorage) UpdateSessionContext(sessionID string, sessionManag
 	log.Debugf("FReD: Storing data for session %s: %s", sessionID, dataToStore)
 
 	fredUpdateOpStartTime := time.Now()
-	f.client.Update(f.keygroup, sessionID, dataToStore, f.useStrong)
+	f.client.Update(f.keygroup, sessionID, dataToStore)
 	// The FReD client's Update method in the sample doesn't return an error.
 	// It might log fatally on errors. A production client should return errors.
 	// We assume success if it doesn't panic.
@@ -178,7 +178,7 @@ func (f *FReDContextStorage) DeleteSessionContext(sessionID string) error {
 
 	fredUpdateOpStartTime := time.Now()
 	// Since the FReD client doesn't have a Delete operation, we overwrite with an empty value.
-	f.client.Update(f.keygroup, sessionID, emptyData, f.useStrong)
+	f.client.Update(f.keygroup, sessionID, emptyData)
 	// The FReD client's Update method in the sample doesn't return an error.
 	// It might log fatally on errors. A production client should return errors.
 	// We assume success if it doesn't panic.
