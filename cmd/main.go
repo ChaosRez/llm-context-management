@@ -39,7 +39,7 @@ func main() {
 	//redisContextStorage := ContextStorage.NewRedisContextStorage(redisAddr, "", 0)
 
 	// Initialize FReDContextStorage
-	fredContextStorage, err := ContextStorage.NewFReDContextStorage(fredAddr, fredKeygroup, fredUseStrongConsistency, fredCreateKeygroup, fredBootstrapNode)
+	fredContextStorage, err := ContextStorage.NewFReDContextStorage(fredAddr, fredKeygroup, fredCreateKeygroup)
 	if err != nil {
 		log.Fatalf("Failed to initialize FReDContextStorage: %v", err)
 	}
@@ -87,7 +87,7 @@ func main() {
 		}
 		log.Infof("Using '%s' context retrieval method for this scenario.", contextMethod)
 
-		// Interactive loop (from yaml)
+		// Scenario loop (from yaml)
 		for _, message := range scen.Messages {
 			fmt.Printf("\nProcessing message: %s\n", message)
 

@@ -1,26 +1,29 @@
 package context_storage
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"time"
 
+	grpcutil "git.tu-berlin.de/mcc-fred/fred/pkg/grpcutil"
 	log "github.com/sirupsen/logrus"
-	fredClient "llm-context-management/internal/pkg/fredclient"
-
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	SessionManager "llm-context-management/internal/app/session_manager"
+	fredClient "llm-context-management/internal/pkg/fredclient"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
 )
 
 const (
 	// DefaultKeygroup is the FReD keygroup where session contexts will be stored.
-	// This could be made configurable.
 	defaultFredKeygroup      = "llm_session_contexts"
 	maxMessagesForFredUpdate = 10000 // Similar to Redis implementation
-	defaultFredReadTimeout   = 500   // Default timeout for FReD read operations in ms
 	expiry                   = 0     // 0 = no expiry time for FReD keygroup upon creation
-	mutable                  = true
+	mutable                  = true  // Keygroups are mutable by default
 )
 
 // ErrFredNotFound is returned when a key is not found in FReD.
@@ -28,41 +31,115 @@ var ErrFredNotFound = fmt.Errorf("key not found in FReD")
 
 // FReDContextStorage implements the ContextStorage interface using FReD.
 type FReDContextStorage struct {
-	client   *fredClient.AlexandraClient
+	client   fredClient.ClientClient
 	keygroup string
 }
 
 // NewFReDContextStorage creates a new FReDContextStorage.
-// addr is the FReD service address (e.g., "127.0.0.1:10000").
-// keygroup is the FReD keygroup to use. If empty, defaultFredKeygroup is used.
-// createKeygroupIfNotExist will attempt to create the keygroup on a specified node if it doesn't exist.
-// bootstrapNode is the node used to create the keygroup (e.g., "nodeA"). Required if createKeygroupIfNotExist is true.
-func NewFReDContextStorage(addr string, keygroup string, createKeygroupIfNotExist bool, bootstrapNode string) (*FReDContextStorage, error) {
+// addr is the FReD node address (e.g., "127.0.0.1:9001").
+// createKeygroupIfNotExist will attempt to create the keygroup if it doesn't exist.
+func NewFReDContextStorage(addr string, keygroup string, createKeygroupIfNotExist bool) (*FReDContextStorage, error) {
 	// Define relative paths for certificates and keys
 	certDir := "fred/cert/"
-	clientCertPath := filepath.Join(certDir, "frededge1.crt") // FIXME: diffrent certs for different nodes
+	clientCertPath := filepath.Join(certDir, "frededge1.crt") // FIXME: different certs for different nodes
 	clientKeyPath := filepath.Join(certDir, "frededge1.key")
 	caCertPath := filepath.Join(certDir, "ca.crt")
 
-	// Pass the certificate paths to NewAlexandraClient
-	c := fredClient.NewAlexandraClient(addr, clientCertPath, clientKeyPath, caCertPath)
+	// Setup gRPC client with TLS using GetCredsFromConfig
+	tlsConfig := &tls.Config{} // GetCredsFromConfig will populate this
+	creds, _, err := grpcutil.GetCredsFromConfig(
+		clientCertPath,
+		clientKeyPath,
+		[]string{caCertPath},
+		false, // insecure
+		false, // skipVerify (set to false for security)
+		tlsConfig,
+	)
+	if err != nil {
+		log.Errorf("Failed to initialize FReD client credentials: %v", err)
+		return nil, fmt.Errorf("failed to initialize FReD client credentials: %w", err)
+	}
+
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		log.Errorf("Failed to connect to FReD gRPC server at %s: %v", addr, err)
+		return nil, fmt.Errorf("failed to connect to FReD gRPC server at %s: %w", addr, err)
+	}
+	// defer conn.Close() // Connection should be managed by the lifetime of FReDContextStorage
+
+	grpcClient := fredClient.NewClientClient(conn)
 
 	storageKeygroup := keygroup
 	if storageKeygroup == "" {
 		storageKeygroup = defaultFredKeygroup
 	}
 
-	if createKeygroupIfNotExist {
-		if bootstrapNode == "" {
-			return nil, fmt.Errorf("bootstrapNode is required when createKeygroupIfNotExist is true")
+	if createKeygroupIfNotExist { // FIXME: this not properly checking if keygroup exists and get errors with ok==true when it already exists
+		log.Infof("FReD: Attempting to create keygroup '%s'.", storageKeygroup)
+
+		createReq := &fredClient.CreateKeygroupRequest{
+			Keygroup: storageKeygroup,
+			Mutable:  mutable,
+			Expiry:   expiry,
 		}
-		log.Infof("FReD: Attempting to create keygroup '%s' on node '%s'", storageKeygroup, bootstrapNode)
-		c.CreateKeygroup(bootstrapNode, storageKeygroup, mutable, expiry, true)
-		log.Infof("FReD: Keygroup '%s' creation initiated (or already exists).", storageKeygroup)
+		_, err := grpcClient.CreateKeygroup(context.Background(), createReq)
+		if err != nil {
+			// Check if error is "already exists" and treat as non-fatal for this specific operation
+			s, ok := status.FromError(err)
+			log.Debugf("FReD: CreateKeygroup response status: '%v', ok: '%v'", s, ok)
+			if ok && s.Code() == codes.AlreadyExists { // Assuming FReD returns AlreadyExists
+				log.Infof("FReD: Keygroup '%s' already exists.", storageKeygroup)
+			} else if ok { // Other gRPC error
+				log.Errorf("FReD: Failed to create keygroup '%s': %v (code: %s, message: %s)", storageKeygroup, err, s.Code(), s.Message())
+				return nil, fmt.Errorf("failed to create keygroup '%s': %w", storageKeygroup, err)
+			} else { // Non-gRPC error
+				log.Errorf("FReD: Failed to create keygroup '%s': %v", storageKeygroup, err)
+				return nil, fmt.Errorf("failed to create keygroup '%s': %w", storageKeygroup, err)
+			}
+		} else {
+			log.Infof("FReD: Keygroup '%s' creation initiated successfully.", storageKeygroup)
+		}
+
+		// Add user to keygroup after creation or if it already exists.
+		// FReD user IDs (often certificate common names) must match what FReD expects.
+		userID := "context-manager"
+
+		permissionsToAdd := []struct {
+			perm fredClient.UserRole
+			name string
+		}{
+			{fredClient.UserRole_ReadKeygroup, "Read"},
+			{fredClient.UserRole_WriteKeygroup, "Write"},
+			{fredClient.UserRole_ConfigureReplica, "ConfigureReplica"},
+		}
+
+		for _, p := range permissionsToAdd {
+			log.Infof("FReD: Attempting to add user '%s' to keygroup '%s' with %s permission.", userID, storageKeygroup, p.name)
+			addUserReq := &fredClient.AddUserRequest{
+				Keygroup: storageKeygroup,
+				User:     userID,
+				Role:     p.perm,
+			}
+			_, errAddUser := grpcClient.AddUser(context.Background(), addUserReq)
+			if errAddUser != nil {
+				s, ok := status.FromError(errAddUser)
+				// FReD might return an error if the permission already exists,
+				// but specific error codes for "already exists" for permissions are not standard in gRPC.
+				// We log the error and continue, assuming the setup might still be usable.
+				if ok {
+					log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v (code: %s, message: %s). This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser, s.Code(), s.Message())
+				} else {
+					log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v. This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser)
+				}
+				// Not returning error here to allow startup even if adding user fails (e.g., user already has permissions, or stricter FReD setup).
+			} else {
+				log.Infof("FReD: Successfully added %s permission for user '%s' to keygroup '%s' (or permission already existed).", p.name, userID, storageKeygroup)
+			}
+		}
 	}
 
 	return &FReDContextStorage{
-		client:   &c,
+		client:   grpcClient,
 		keygroup: storageKeygroup,
 	}, nil
 }
@@ -76,20 +153,39 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 
 	log.Infof("FReD: Attempting to retrieve tokenized context for session ID: %s from keygroup: %s", sessionID, f.keygroup)
 
+	readReq := &fredClient.ReadRequest{
+		Keygroup: f.keygroup,
+		Id:       sessionID,
+	}
+
 	fredReadStartTime := time.Now()
-	readData := f.client.Read(f.keygroup, sessionID, defaultFredReadTimeout)
+	// For a client-side timeout, use context.WithTimeout here.
+	// Example: ctx, cancel := context.WithTimeout(context.Background(), time.Duration(defaultFredReadTimeout)*time.Millisecond)
+	// defer cancel()
+	// readResp, err := f.client.Read(ctx, readReq)
+	readResp, err := f.client.Read(context.Background(), readReq)
 	log.Debugf("FReD: Read for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredReadStartTime))
 
-	if len(readData) == 0 {
-		log.Warnf("FReD: Cache miss for session ID: %s in keygroup: %s. No data returned.", sessionID, f.keygroup)
-		return nil, ErrFredNotFound
+	if err != nil {
+		s, ok := status.FromError(err)
+		if ok && s.Code() == codes.NotFound {
+			log.Warnf("FReD: Cache miss (NotFound) for session ID: %s in keygroup: %s.", sessionID, f.keygroup)
+			return nil, ErrFredNotFound
+		}
+		log.Errorf("FReD: Failed to read from keygroup '%s', id '%s': %v", f.keygroup, sessionID, err)
+		return nil, fmt.Errorf("failed to read from FReD: %w", err)
 	}
 
-	if len(readData) > 1 {
-		log.Warnf("FReD: Expected 1 item for session ID %s, but got %d. Using the first one.", sessionID, len(readData))
+	if readResp == nil || len(readResp.Data) == 0 {
+		log.Warnf("FReD: Cache miss for session ID: '%s' in keygroup: '%s'. No data items returned.", sessionID, f.keygroup)
+		return nil, ErrFredNotFound // Or []int{}, nil if empty is not an error but a valid "not found" state for tokens
 	}
 
-	jsonData := readData[0]
+	if len(readResp.Data) > 1 {
+		log.Warnf("FReD: Expected 1 item for session ID '%s', but got %d. Using the first one.", sessionID, len(readResp.Data))
+	}
+
+	jsonData := readResp.Data[0].Val
 	if jsonData == "" || jsonData == "[]" { // Check for empty string or empty JSON array explicitly
 		log.Infof("FReD: Cache hit for session ID: %s, but data is empty. Returning empty token list.", sessionID)
 		return []int{}, nil // Return empty slice, not an error
@@ -98,11 +194,11 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 	log.Infof("FReD: Cache hit for session ID: %s in keygroup: %s", sessionID, f.keygroup)
 	unmarshalStartTime := time.Now()
 	var tokens []int
-	err := json.Unmarshal([]byte(jsonData), &tokens)
+	errUnmarshal := json.Unmarshal([]byte(jsonData), &tokens)
 	log.Debugf("FReD: JSON unmarshal for session %s took %s", sessionID, time.Since(unmarshalStartTime))
-	if err != nil {
-		log.Errorf("FReD: Failed to unmarshal cached tokens for session ID %s: %v. Data: %s", sessionID, err, jsonData)
-		return nil, fmt.Errorf("failed to unmarshal cached tokens from FReD: %w", err)
+	if errUnmarshal != nil {
+		log.Errorf("FReD: Failed to unmarshal cached tokens for session ID %s: %v. Data: %s", sessionID, errUnmarshal, jsonData)
+		return nil, fmt.Errorf("failed to unmarshal cached tokens from FReD: %w", errUnmarshal)
 	}
 	return tokens, nil
 }
@@ -155,36 +251,54 @@ func (f *FReDContextStorage) UpdateSessionContext(sessionID string, sessionManag
 	dataToStore := string(tokenBytes)
 	log.Debugf("FReD: Storing data for session %s: %s", sessionID, dataToStore)
 
+	updateReq := &fredClient.UpdateRequest{
+		Keygroup: f.keygroup,
+		Id:       sessionID,
+		Data:     dataToStore,
+	}
+
 	fredUpdateOpStartTime := time.Now()
-	f.client.Update(f.keygroup, sessionID, dataToStore)
-	// The FReD client's Update method in the sample doesn't return an error.
-	// It might log fatally on errors. A production client should return errors.
-	// We assume success if it doesn't panic.
+	_, err = f.client.Update(context.Background(), updateReq)
 	log.Debugf("FReD: Update operation for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredUpdateOpStartTime))
+	if err != nil {
+		log.Errorf("FReD: Failed to update key %s in keygroup %s: %v", sessionID, f.keygroup, err)
+		return fmt.Errorf("failed to update FReD: %w", err)
+	}
+
 	log.Infof("FReD: Tokenized context cache successfully updated for session ID: %s", sessionID)
 	return nil
 }
 
-// DeleteSessionContext removes the session context from FReD by updating it with an empty value.
+// DeleteSessionContext removes the session context from FReD.
 func (f *FReDContextStorage) DeleteSessionContext(sessionID string) error {
 	startTime := time.Now()
 	defer func() {
-		log.Infof("FReD: DeleteSessionContext (by overwriting with empty) for session %s took %s", sessionID, time.Since(startTime))
+		log.Infof("FReD: DeleteSessionContext for session %s took %s", sessionID, time.Since(startTime))
 	}()
 
-	log.Infof("FReD: Attempting to delete (by overwriting with empty) tokenized context for session ID: %s from keygroup: %s", sessionID, f.keygroup)
+	log.Infof("FReD: Attempting to delete tokenized context for session ID: %s from keygroup: %s", sessionID, f.keygroup)
 
-	emptyData := "[]" // Representing an empty list of tokens
+	deleteReq := &fredClient.DeleteRequest{
+		Keygroup: f.keygroup,
+		Id:       sessionID,
+	}
 
-	fredUpdateOpStartTime := time.Now()
-	// Since the FReD client doesn't have a Delete operation, we overwrite with an empty value.
-	f.client.Update(f.keygroup, sessionID, emptyData)
-	// The FReD client's Update method in the sample doesn't return an error.
-	// It might log fatally on errors. A production client should return errors.
-	// We assume success if it doesn't panic.
-	log.Debugf("FReD: Overwrite (delete) operation for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredUpdateOpStartTime))
+	fredDeleteOpStartTime := time.Now()
+	_, err := f.client.Delete(context.Background(), deleteReq)
+	log.Debugf("FReD: Delete operation for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredDeleteOpStartTime))
 
-	log.Infof("FReD: Successfully deleted (by overwriting with empty) tokenized context from FReD for session ID: %s", sessionID)
+	if err != nil {
+		// Check if the error is NotFound, which can be considered a successful deletion if the item didn't exist.
+		s, ok := status.FromError(err)
+		if ok && s.Code() == codes.NotFound {
+			log.Warnf("FReD: Attempted to delete key %s in keygroup %s, but it was not found. Considered deleted.", sessionID, f.keygroup)
+			return nil // Or return ErrFredNotFound if the caller needs to know it wasn't there
+		}
+		log.Errorf("FReD: Failed to delete key %s in keygroup %s: %v", sessionID, f.keygroup, err)
+		return fmt.Errorf("failed to delete from FReD: %w", err)
+	}
+
+	log.Infof("FReD: Successfully deleted tokenized context from FReD for session ID: %s", sessionID)
 	return nil
 }
 
