@@ -74,74 +74,90 @@ func NewFReDContextStorage(addr string, keygroup string, createKeygroupIfNotExis
 		storageKeygroup = defaultFredKeygroup
 	}
 
-	if createKeygroupIfNotExist { // FIXME: this not properly checking if keygroup exists and get errors with ok==true when it already exists
-		log.Infof("FReD: Attempting to create keygroup '%s'.", storageKeygroup)
+	fs := &FReDContextStorage{
+		client:   grpcClient,
+		keygroup: storageKeygroup,
+	}
 
-		createReq := &fredClient.CreateKeygroupRequest{
-			Keygroup: storageKeygroup,
-			Mutable:  mutable,
-			Expiry:   expiry,
-		}
-		_, err := grpcClient.CreateKeygroup(context.Background(), createReq)
-		if err != nil {
-			// Check if error is "already exists" and treat as non-fatal for this specific operation
-			s, ok := status.FromError(err)
-			log.Debugf("FReD: CreateKeygroup response status: '%v', ok: '%v'", s, ok)
-			if ok && s.Code() == codes.AlreadyExists { // Assuming FReD returns AlreadyExists
-				log.Infof("FReD: Keygroup '%s' already exists.", storageKeygroup)
-			} else if ok { // Other gRPC error
-				log.Errorf("FReD: Failed to create keygroup '%s': %v (code: %s, message: %s)", storageKeygroup, err, s.Code(), s.Message())
-				return nil, fmt.Errorf("failed to create keygroup '%s': %w", storageKeygroup, err)
-			} else { // Non-gRPC error
-				log.Errorf("FReD: Failed to create keygroup '%s': %v", storageKeygroup, err)
-				return nil, fmt.Errorf("failed to create keygroup '%s': %w", storageKeygroup, err)
+	if createKeygroupIfNotExist {
+		if err := fs.initializeKeygroup(grpcClient, storageKeygroup); err != nil {
+			// Attempt to close the connection if initialization fails.
+			if connErr := conn.Close(); connErr != nil {
+				log.Warnf("FReD: Failed to close gRPC connection after initialization error: %v", connErr)
 			}
-		} else {
-			log.Infof("FReD: Keygroup '%s' creation initiated successfully.", storageKeygroup)
-		}
-
-		// Add user to keygroup after creation or if it already exists.
-		// FReD user IDs (often certificate common names) must match what FReD expects.
-		userID := "context-manager"
-
-		permissionsToAdd := []struct {
-			perm fredClient.UserRole
-			name string
-		}{
-			{fredClient.UserRole_ReadKeygroup, "Read"},
-			{fredClient.UserRole_WriteKeygroup, "Write"},
-			{fredClient.UserRole_ConfigureReplica, "ConfigureReplica"},
-		}
-
-		for _, p := range permissionsToAdd {
-			log.Infof("FReD: Attempting to add user '%s' to keygroup '%s' with %s permission.", userID, storageKeygroup, p.name)
-			addUserReq := &fredClient.AddUserRequest{
-				Keygroup: storageKeygroup,
-				User:     userID,
-				Role:     p.perm,
-			}
-			_, errAddUser := grpcClient.AddUser(context.Background(), addUserReq)
-			if errAddUser != nil {
-				s, ok := status.FromError(errAddUser)
-				// FReD might return an error if the permission already exists,
-				// but specific error codes for "already exists" for permissions are not standard in gRPC.
-				// We log the error and continue, assuming the setup might still be usable.
-				if ok {
-					log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v (code: %s, message: %s). This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser, s.Code(), s.Message())
-				} else {
-					log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v. This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser)
-				}
-				// Not returning error here to allow startup even if adding user fails (e.g., user already has permissions, or stricter FReD setup).
-			} else {
-				log.Infof("FReD: Successfully added %s permission for user '%s' to keygroup '%s' (or permission already existed).", p.name, userID, storageKeygroup)
-			}
+			return nil, err // Return the initialization error
 		}
 	}
 
-	return &FReDContextStorage{
-		client:   grpcClient,
-		keygroup: storageKeygroup,
-	}, nil
+	return fs, nil
+}
+
+// initializeKeygroup creates the keygroup if it doesn't exist and adds necessary user permissions.
+func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClient, storageKeygroup string) error {
+	log.Infof("FReD: Attempting to create keygroup '%s'.", storageKeygroup)
+
+	// FIXME: this not properly checking if keygroup exists and get errors with ok==true when it already exists
+	createReq := &fredClient.CreateKeygroupRequest{
+		Keygroup: storageKeygroup,
+		Mutable:  mutable,
+		Expiry:   expiry,
+	}
+	_, err := grpcClient.CreateKeygroup(context.Background(), createReq)
+	if err != nil {
+		// Check if error is "already exists" and treat as non-fatal for this specific operation
+		s, ok := status.FromError(err)
+		log.Debugf("FReD: CreateKeygroup response status: '%v', ok: '%v'", s, ok)
+		if ok && s.Code() == codes.AlreadyExists { // Assuming FReD returns AlreadyExists
+			log.Infof("FReD: Keygroup '%s' already exists.", storageKeygroup)
+		} else if ok { // Other gRPC error
+			log.Errorf("FReD: Failed to create keygroup '%s': %v (code: %s, message: %s)", storageKeygroup, err, s.Code(), s.Message())
+			return fmt.Errorf("failed to create keygroup '%s': %w", storageKeygroup, err)
+		} else { // Non-gRPC error
+			log.Errorf("FReD: Failed to create keygroup '%s': %v", storageKeygroup, err)
+			return fmt.Errorf("failed to create keygroup '%s': %w", storageKeygroup, err)
+		}
+	} else {
+		log.Infof("FReD: Keygroup '%s' creation initiated successfully.", storageKeygroup)
+	}
+
+	// Add user to keygroup after creation or if it already exists.
+	// FReD user IDs (often certificate common names) must match what FReD expects.
+	userID := "context-manager"
+
+	permissionsToAdd := []struct {
+		perm fredClient.UserRole
+		name string
+	}{
+		{fredClient.UserRole_ReadKeygroup, "Read"},
+		{fredClient.UserRole_WriteKeygroup, "Write"},
+		{fredClient.UserRole_ConfigureReplica, "ConfigureReplica"},
+	}
+
+	log.Infof("FReD: Adding permissions to add keygroup '%s'.", storageKeygroup)
+	for _, p := range permissionsToAdd {
+		//log.Infof("FReD: Attempting to add user '%s' to keygroup '%s' with %s permission.", userID, storageKeygroup, p.name)
+		addUserReq := &fredClient.AddUserRequest{
+			Keygroup: storageKeygroup,
+			User:     userID,
+			Role:     p.perm,
+		}
+		_, errAddUser := grpcClient.AddUser(context.Background(), addUserReq)
+		if errAddUser != nil {
+			s, ok := status.FromError(errAddUser)
+			// FReD might return an error if the permission already exists,
+			// but specific error codes for "already exists" for permissions are not standard in gRPC.
+			// We log the error and continue, assuming the setup might still be usable.
+			if ok {
+				log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v (code: %s, message: %s). This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser, s.Code(), s.Message())
+			} else {
+				log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v. This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser)
+			}
+			// Not returning error here to allow startup even if adding user fails (e.g., user already has permissions, or stricter FReD setup).
+		} else {
+			log.Infof("FReD: Successfully added %s permission for user '%s' to keygroup '%s' (or permission already existed).", p.name, userID, storageKeygroup)
+		}
+	}
+	return nil
 }
 
 // GetTokenizedSessionContext retrieves the tokenized session context from FReD.
