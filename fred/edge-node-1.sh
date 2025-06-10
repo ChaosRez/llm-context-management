@@ -4,7 +4,7 @@ set -x
 
 source ./config.sh
 EDGE_IP=$EDGE_IP_1
-ETCD_IP=$EDGE_IP_2
+ETCD_IP=$EDGE_IP_1
 
 # reza-node
        ./frednode \

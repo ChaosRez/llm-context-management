@@ -4,7 +4,7 @@ set -x
 # start etcd
     source ./config.sh
     EDGE_IP=$EDGE_IP_1
-    ETCD_IP=$EDGE_IP_2
+    ETCD_IP=$EDGE_IP_1
 
     etcd --name s-1 \
     --data-dir /tmp/etcd/s-1 \
@@ -15,8 +15,8 @@ set -x
     --initial-cluster s-1=http://0.0.0.0:2380 \
     --initial-cluster-token tkn \
     --initial-cluster-state new \
-    --cert-file=cert/frededge2.crt \
-    --key-file=cert/frededge2.key \
+    --cert-file=cert/frededge1.crt \
+    --key-file=cert/frededge1.key \
     --client-cert-auth \
     --trusted-ca-file=cert/ca.crt
 

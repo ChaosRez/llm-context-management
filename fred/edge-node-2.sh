@@ -1,13 +1,15 @@
 #!/bin/bash
 
 set -x
+
 source ./config.sh
 EDGE_IP=$EDGE_IP_2
+ETCD_IP=$EDGE_IP_1
 
-# # minghe-node--ETCD Node
+# # minghe-node
         ./frednode \
         --nodeID frededge2 \
-        --nase-host "$EDGE_IP:2379" \
+        --nase-host "$ETCD_IP:2379" \
         --nase-cached \
         --adaptor badgerdb \
         --badgerdb-path ./db \
