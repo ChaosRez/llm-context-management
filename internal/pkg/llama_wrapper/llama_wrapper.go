@@ -3,6 +3,7 @@ package llama_wrapper
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
@@ -52,28 +53,33 @@ func (c *LlamaClient) doRequest(method, path string, body interface{}, result in
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	httpStartTime := time.Now()
+	//httpStartTime := time.Now()
 	resp, err := http.DefaultClient.Do(req)
-	log.Debugf("LlamaClient.doRequest HTTP call for %s %s took %s", method, path, time.Since(httpStartTime))
+	//log.Debugf("LlamaClient.doRequest HTTP call for %s %s took %s", method, path, time.Since(httpStartTime))
 	if err != nil {
 		log.Errorf("LlamaClient.doRequest HTTP Do failed for %s %s: %v", method, path, err)
 		return err
 	}
 	defer resp.Body.Close()
 
+	responseBodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Errorf("LlamaClient.doRequest failed to read response body for %s %s: %v", method, path, readErr)
+		return readErr
+	}
+
 	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Errorf("LlamaClient.doRequest %s %s returned error status %d: %s", method, path, resp.StatusCode, string(bodyBytes))
-		// Re-assign resp.Body as ReadAll consumes it
-		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		errMsg := string(responseBodyBytes)
+		log.Errorf("LlamaClient.doRequest %s %s returned error status %d: %s", method, path, resp.StatusCode, errMsg)
+		return fmt.Errorf("server error: status %d, body: %s", resp.StatusCode, errMsg)
 	}
 
 	if result != nil {
 		decodeStartTime := time.Now()
-		err = json.NewDecoder(resp.Body).Decode(result)
+		err = json.NewDecoder(bytes.NewBuffer(responseBodyBytes)).Decode(result)
 		log.Debugf("LlamaClient.doRequest JSON decode for %s %s took %s", method, path, time.Since(decodeStartTime))
 		if err != nil {
-			log.Errorf("LlamaClient.doRequest failed to decode response for %s %s: %v", method, path, err)
+			log.Errorf("LlamaClient.doRequest failed to decode response for %s %s: %v. Response body: %s", method, path, err, string(responseBodyBytes))
 			return err
 		}
 	}
