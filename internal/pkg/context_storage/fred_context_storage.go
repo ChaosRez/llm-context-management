@@ -20,7 +20,8 @@ import (
 
 const (
 	// DefaultKeygroup is the FReD keygroup where session contexts will be stored.
-	defaultFredKeygroup      = "llm_session_contexts"
+	defaultFredKeygroup      = "default-llm-model"
+	userID                   = "context-manager"
 	maxMessagesForFredUpdate = 10000 // Similar to Redis implementation
 	expiry                   = 0     // 0 = no expiry time for FReD keygroup upon creation
 	mutable                  = true  // Keygroups are mutable by default
@@ -80,7 +81,7 @@ func NewFReDContextStorage(addr string, keygroup string, createKeygroupIfNotExis
 	}
 
 	if createKeygroupIfNotExist {
-		if err := fs.initializeKeygroup(grpcClient, storageKeygroup); err != nil {
+		if err := fs.initializeKeygroup(grpcClient, storageKeygroup, addr); err != nil {
 			// Attempt to close the connection if initialization fails.
 			if connErr := conn.Close(); connErr != nil {
 				log.Warnf("FReD: Failed to close gRPC connection after initialization error: %v", connErr)
@@ -93,7 +94,8 @@ func NewFReDContextStorage(addr string, keygroup string, createKeygroupIfNotExis
 }
 
 // initializeKeygroup creates the keygroup if it doesn't exist and adds necessary user permissions.
-func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClient, storageKeygroup string) error {
+// selfAddr is the address of this node, used to determine self NodeId for replication.
+func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClient, storageKeygroup string, selfAddr string) error {
 	log.Infof("FReD: Attempting to create keygroup '%s'.", storageKeygroup)
 
 	// FIXME: this not properly checking if keygroup exists and get errors with ok==true when it already exists
@@ -121,9 +123,6 @@ func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClie
 	}
 
 	// Add user to keygroup after creation or if it already exists.
-	// FReD user IDs (often certificate common names) must match what FReD expects.
-	userID := "context-manager"
-
 	permissionsToAdd := []struct {
 		perm fredClient.UserRole
 		name string
@@ -132,10 +131,8 @@ func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClie
 		{fredClient.UserRole_WriteKeygroup, "Write"},
 		{fredClient.UserRole_ConfigureReplica, "ConfigureReplica"},
 	}
-
 	log.Infof("FReD: Adding permissions to add keygroup '%s'.", storageKeygroup)
 	for _, p := range permissionsToAdd {
-		//log.Infof("FReD: Attempting to add user '%s' to keygroup '%s' with %s permission.", userID, storageKeygroup, p.name)
 		addUserReq := &fredClient.AddUserRequest{
 			Keygroup: storageKeygroup,
 			User:     userID,
@@ -144,9 +141,6 @@ func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClie
 		_, errAddUser := grpcClient.AddUser(context.Background(), addUserReq)
 		if errAddUser != nil {
 			s, ok := status.FromError(errAddUser)
-			// FReD might return an error if the permission already exists,
-			// but specific error codes for "already exists" for permissions are not standard in gRPC.
-			// We log the error and continue, assuming the setup might still be usable.
 			if ok {
 				log.Warnf("FReD: Failed to add %s permission for user '%s' to keygroup '%s': %v (code: %s, message: %s). This might be non-critical if permission already exists.", p.name, userID, storageKeygroup, errAddUser, s.Code(), s.Message())
 			} else {
@@ -157,6 +151,81 @@ func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClie
 			log.Infof("FReD: Successfully added %s permission for user '%s' to keygroup '%s' (or permission already existed).", p.name, userID, storageKeygroup)
 		}
 	}
+
+	// --- Replicate keygroup to other nodes ---
+	// Get keygroup info to find current replicas
+	keygroupInfo, err := grpcClient.GetKeygroupInfo(context.Background(), &fredClient.GetKeygroupInfoRequest{
+		Keygroup: storageKeygroup,
+	})
+	if err != nil {
+		log.Warnf("FReD: Could not get keygroup info for replication: %v", err)
+		// Not fatal, continue
+		return nil
+	}
+
+	// Get all known nodes in the FReD cluster
+	allReplicasResp, err := grpcClient.GetAllReplica(context.Background(), &fredClient.Empty{})
+	if err != nil {
+		log.Warnf("FReD: Could not get all replicas for replication: %v", err)
+		return nil
+	}
+
+	// Determine self NodeId by matching our address with the replica list
+	var selfNodeId string
+	for _, node := range allReplicasResp.Replicas {
+		if node.Host == selfAddr {
+			selfNodeId = node.NodeId
+			break
+		}
+	}
+	// Fallback: try to match by host in keygroupInfo.Replica if not found
+	if selfNodeId == "" {
+		log.Warn("FReD: Could not determine self NodeId from all replicas, trying keygroupInfo replicas.")
+		for _, r := range keygroupInfo.Replica {
+			if r.Host == selfAddr {
+				selfNodeId = r.NodeId
+				break
+			}
+		}
+	}
+	// If still not found, fallback to first replica NodeId (should not happen in normal cases)
+	if selfNodeId == "" && len(keygroupInfo.Replica) > 0 {
+		log.Warnf("FReD: Could not determine self NodeId from replicas, using first replica NodeId: %s", keygroupInfo.Replica[0].NodeId)
+		selfNodeId = keygroupInfo.Replica[0].NodeId
+	}
+
+	// Build a set of current replica NodeIds for this keygroup
+	currentReplicas := make(map[string]struct{})
+	for _, r := range keygroupInfo.Replica {
+		currentReplicas[r.NodeId] = struct{}{}
+	}
+
+	// Replicate to all nodes that are not yet replicas and are not self
+	for _, node := range allReplicasResp.Replicas {
+		if node.NodeId == selfNodeId {
+			continue // skip self
+		}
+		if _, alreadyReplica := currentReplicas[node.NodeId]; alreadyReplica {
+			continue
+		}
+		// Try to add this node as a replica
+		_, err := grpcClient.AddReplica(context.Background(), &fredClient.AddReplicaRequest{
+			Keygroup: storageKeygroup,
+			NodeId:   node.NodeId,
+			Expiry:   expiry,
+		})
+		if err != nil {
+			s, ok := status.FromError(err)
+			if ok && s.Code() == codes.AlreadyExists {
+				log.Warnf("FReD: Node %s is already a replica of keygroup %s.", node.NodeId, storageKeygroup)
+			} else {
+				log.Errorf("FReD: Failed to replicate keygroup '%s' to node '%s': %v", storageKeygroup, node.NodeId, err)
+			}
+		} else {
+			log.Infof("FReD: Successfully replicated keygroup '%s' to node '%s'.", storageKeygroup, node.NodeId)
+		}
+	}
+
 	return nil
 }
 
