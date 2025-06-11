@@ -4,7 +4,7 @@ set -x
 
 source ./config.sh
 EDGE_IP=$EDGE_IP_2
-ETCD_IP=$EDGE_IP_1
+ETCD_IP=$ETCD_NODE_IP
 
 # # minghe-node
         ./frednode \
@@ -19,21 +19,21 @@ ETCD_IP=$EDGE_IP_1
         --peer-advertise-host "$EDGE_IP:5555" \
         --log-level debug \
         --handler dev \
-        --cert cert/frededge2.crt \
-        --key cert/frededge2.key \
-        --ca-file cert/ca.crt \
+        --cert $CERTS_DIR/frededge2.crt \
+        --key $CERTS_DIR/frededge2.key \
+        --ca-file $CERTS_DIR/ca.crt \
         --skip-verify \
-        --peer-cert cert/frededge2.crt \
-        --peer-key cert/frededge2.key \
-        --peer-ca cert/ca.crt \
+        --peer-cert $CERTS_DIR/frededge2.crt \
+        --peer-key $CERTS_DIR/frededge2.key \
+        --peer-ca $CERTS_DIR/ca.crt \
         --peer-skip-verify \
-        --nase-cert cert/frededge2.crt \
-        --nase-key cert/frededge2.key \
-        --nase-ca cert/ca.crt \
+        --nase-cert $CERTS_DIR/frededge2.crt \
+        --nase-key $CERTS_DIR/frededge2.key \
+        --nase-ca $CERTS_DIR/ca.crt \
         --nase-skip-verify \
-        --trigger-cert cert/frededge2.crt \
-        --trigger-key cert/frededge2.key \
-        --trigger-ca cert/ca.crt \
+        --trigger-cert $CERTS_DIR/frededge2.crt \
+        --trigger-key $CERTS_DIR/frededge2.key \
+        --trigger-ca $CERTS_DIR/ca.crt \
         --trigger-skip-verify
 
 set +x

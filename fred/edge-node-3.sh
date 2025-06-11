@@ -3,12 +3,12 @@
 set -x
 
 source ./config.sh
-EDGE_IP=$EDGE_IP_1
+EDGE_IP=$JETSON_IP
 ETCD_IP=$ETCD_NODE_IP
 
-# reza-node
-       ./frednode \
-        --nodeID frededge1 \
+
+        ./frednode \
+        --nodeID fredjetson \
         --nase-host "$ETCD_IP:2379" \
         --nase-cached \
         --adaptor badgerdb \
@@ -19,22 +19,21 @@ ETCD_IP=$ETCD_NODE_IP
         --peer-advertise-host "$EDGE_IP:5555" \
         --log-level debug \
         --handler dev \
-        --cert $CERTS_DIR/frededge1.crt \
-        --key $CERTS_DIR/frededge1.key \
+        --cert $CERTS_DIR/fredjetson.crt \
+        --key $CERTS_DIR/fredjetson.key \
         --ca-file $CERTS_DIR/ca.crt \
         --skip-verify \
-        --peer-cert $CERTS_DIR/frededge1.crt \
-        --peer-key $CERTS_DIR/frededge1.key \
+        --peer-cert $CERTS_DIR/fredjetson.crt \
+        --peer-key $CERTS_DIR/fredjetson.key \
         --peer-ca $CERTS_DIR/ca.crt \
         --peer-skip-verify \
-        --nase-cert $CERTS_DIR/frededge2.crt \
-        --nase-key $CERTS_DIR/frededge2.key \
+        --nase-cert $CERTS_DIR/fredjetson.crt \
+        --nase-key $CERTS_DIR/fredjetson.key \
         --nase-ca $CERTS_DIR/ca.crt \
         --nase-skip-verify \
-        --trigger-cert $CERTS_DIR/frededge1.crt \
-        --trigger-key $CERTS_DIR/frededge1.key \
+        --trigger-cert $CERTS_DIR/fredjetson.crt \
+        --trigger-key $CERTS_DIR/fredjetson.key \
         --trigger-ca $CERTS_DIR/ca.crt \
         --trigger-skip-verify
-
 
 set +x
