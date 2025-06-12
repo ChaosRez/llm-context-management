@@ -2,7 +2,8 @@ package main
 
 import (
 	"bufio" // Needed for scenario mode
-	"fmt"   // Needed for scenario mode
+	"encoding/csv"
+	"fmt" // Needed for scenario mode
 	log "github.com/sirupsen/logrus"
 	Scenario "llm-context-management/internal/app/scenario" // Needed for scenario mode
 	Server "llm-context-management/internal/app/server"
@@ -12,11 +13,33 @@ import (
 	"os" // Needed for scenario mode
 	"path/filepath"
 	"runtime"
+	"strconv" // for CSV writing (duration to ms)
 	"strings"
 	"time"
 )
 
 // TODO fix the Payload keys for server
+
+// Helper function to write operation timing to CSV
+func writeOperationToCsv(writer *csv.Writer, opActualStartTime time.Time, operationName string, duration time.Duration, contextMethod string, scenarioName string, sessionID string, details string) {
+	if writer == nil {
+		log.Warnf("CSV writer not initialized when trying to log operation: %s", operationName)
+		return
+	}
+	record := []string{
+		opActualStartTime.Format("2006-01-02T15:04:05.000Z07:00"), // ISO8601 like timestamp for operation start
+		operationName,
+		strconv.FormatInt(duration.Milliseconds(), 10),
+		contextMethod,
+		scenarioName,
+		sessionID,
+		details,
+	}
+	if err := writer.Write(record); err != nil {
+		log.Errorf("Failed to write record to CSV for operation %s: %v", operationName, err)
+	}
+}
+
 func main() {
 	// --- Configuration ---
 	const runServerMode = true // false to run the interactive scenario mode (file).
@@ -55,23 +78,29 @@ func main() {
 		// --- Interactive Scenario Mode ---
 		log.Info("Starting in Interactive Scenario Mode...")
 
+		var csvFile *os.File
+		var csvWriter *csv.Writer
+		var errCsv error
+
 		// Load scenario from YAML
-		loadScenStartTime := time.Now()
+		loadScenOpStartTime := time.Now()
 		scen, errScenario := Scenario.LoadScenario(scenarioFilePath)
 		if errScenario != nil {
 			log.Fatalf("Failed to load scenario '%s': %v", scenarioFilePath, errScenario)
 		}
-		log.Infof("Scenario.LoadScenario took %v", time.Since(loadScenStartTime))
+		loadScenDuration := time.Since(loadScenOpStartTime)
+		log.Infof("Scenario.LoadScenario took %v", loadScenDuration)
 		log.Infof("Loaded scenario: %s", scen.Name)
 		log.Infof("Using model: %s", scen.ModelName)
 
 		// Create a new session for the scenario
-		createSessStartTime := time.Now()
+		createSessOpStartTime := time.Now()
 		sessionID, errSession := sessionManager.CreateSession(scen.UserID, sessionDurationDays)
 		if errSession != nil {
 			log.Fatalf("Failed to create session: %v", errSession)
 		}
-		log.Infof("sessionManager.CreateSession took %v", time.Since(createSessStartTime))
+		createSessDuration := time.Since(createSessOpStartTime)
+		log.Infof("sessionManager.CreateSession took %v", createSessDuration)
 		log.Infof("Created session ID: %s", sessionID)
 
 		modelName := scen.ModelName // Capture model name for session messages
@@ -87,10 +116,46 @@ func main() {
 		}
 		log.Infof("Using '%s' context retrieval method for this scenario.", contextMethod)
 
+		// Initialize CSV writer now that contextMethod and scen.Name are known
+		safeScenarioName := strings.ReplaceAll(strings.ToLower(scen.Name), " ", "_")
+		safeScenarioName = strings.ReplaceAll(safeScenarioName, "/", "_") // Basic sanitization
+		safeContextMethod := strings.ReplaceAll(strings.ToLower(contextMethod), " ", "_")
+
+		// Define the log directory
+		logDir := "testdata/log/"
+		// Ensure the log directory exists
+		if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
+			log.Fatalf("Failed to create log directory %s: %v", logDir, err)
+		}
+
+		csvFilename := filepath.Join(logDir, fmt.Sprintf("%s_%s_scenario_%s.csv",
+			time.Now().Format("20060102_150405"),
+			safeContextMethod,
+			safeScenarioName))
+
+		csvFile, errCsv = os.Create(csvFilename)
+		if errCsv != nil {
+			log.Fatalf("Failed to create CSV log file %s: %v", csvFilename, errCsv)
+		}
+		defer csvFile.Close()
+
+		csvWriter = csv.NewWriter(csvFile)
+		defer csvWriter.Flush()
+
+		headers := []string{"Timestamp", "Operation", "DurationMs", "ContextMethod", "ScenarioName", "SessionID", "Details"}
+		if err := csvWriter.Write(headers); err != nil {
+			log.Fatalf("Failed to write CSV header to %s: %v", csvFilename, err)
+		}
+		log.Infof("Logging operations to %s", csvFilename)
+
+		// Write the previously captured timings
+		writeOperationToCsv(csvWriter, loadScenOpStartTime, "Scenario.LoadScenario", loadScenDuration, contextMethod, scen.Name, "", fmt.Sprintf("File: %s", filepath.Base(scenarioFilePath)))
+		writeOperationToCsv(csvWriter, createSessOpStartTime, "sessionManager.CreateSession", createSessDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("UserID: %s, DurationDays: %d", scen.UserID, sessionDurationDays))
+
 		scenarioProcessingStartTime := time.Now() // Start timing after context method selection
 
 		// Scenario loop (from yaml)
-		for _, message := range scen.Messages {
+		for i, message := range scen.Messages {
 			fmt.Printf("\nProcessing message: %s\n", message)
 
 			var req map[string]interface{}
@@ -99,12 +164,15 @@ func main() {
 			var tokenizedContext []int
 			var errCtx error
 			var opStartTime time.Time
+			var opDuration time.Duration
 
 			if contextMethod == "raw" {
 				const rawHistoryLength = 20 // Or make configurable
 				opStartTime = time.Now()
 				textContext, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength)
-				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", time.Since(opStartTime))
+				opDuration = time.Since(opStartTime)
+				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", opDuration)
+				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.GetTextSessionContext (raw)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, HistoryLength: %d", i, rawHistoryLength))
 				if errCtx != nil {
 					log.Fatalf("Failed to get raw session context: %v", errCtx)
 				}
@@ -119,7 +187,9 @@ func main() {
 			} else { // contextMethod == "tokenized"
 				opStartTime = time.Now()
 				tokenizedContext, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
-				log.Infof("fredContextStorage.GetTokenizedSessionContext took %v", time.Since(opStartTime))
+				opDuration = time.Since(opStartTime)
+				log.Infof("fredContextStorage.GetTokenizedSessionContext took %v", opDuration)
+				writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetTokenizedSessionContext", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
 				// Allow proceeding even if context doesn't exist yet (first message)
 				if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
 					log.Warnf("Failed to get tokenized session context (proceeding without): %v", errCtx)
@@ -144,14 +214,18 @@ func main() {
 
 			opStartTime = time.Now()
 			resp, errCompletion := llamaService.Completion(req)
-			log.Infof("llamaService.Completion took %v", time.Since(opStartTime))
+			opDuration = time.Since(opStartTime)
+			log.Infof("llamaService.Completion took %v", opDuration)
+			writeOperationToCsv(csvWriter, opStartTime, "llamaService.Completion", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, PromptChars: %d", i, len(prompt)))
 			if errCompletion != nil {
 				log.Fatalf("Completion error: %v", errCompletion)
 			}
 
 			opStartTime = time.Now()
 			_, errAddMsg := sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
-			log.Infof("sessionManager.AddMessage (user) took %v", time.Since(opStartTime))
+			opDuration = time.Since(opStartTime)
+			log.Infof("sessionManager.AddMessage (user) took %v", opDuration)
+			writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (user)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: user, MessageChars: %d", i, len(message)))
 			if errAddMsg != nil {
 				log.Errorf("Failed to add user message: %v", errAddMsg)
 			}
@@ -162,7 +236,9 @@ func main() {
 				fmt.Printf("Response: \n%s\n", assistantMsg)
 				opStartTime = time.Now()
 				_, errAddMsg = sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
-				log.Infof("sessionManager.AddMessage (assistant) took %v", time.Since(opStartTime))
+				opDuration = time.Since(opStartTime)
+				log.Infof("sessionManager.AddMessage (assistant) took %v", opDuration)
+				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (assistant)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: assistant, MessageChars: %d", i, len(assistantMsg)))
 				if errAddMsg != nil {
 					log.Errorf("Failed to add assistant message: %v", errAddMsg)
 				}
@@ -170,7 +246,9 @@ func main() {
 				// Update tokenized context in context store *after* adding both messages
 				opStartTime = time.Now()
 				errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
-				log.Infof("fredContextStorage.UpdateSessionContext took %v", time.Since(opStartTime))
+				opDuration = time.Since(opStartTime)
+				log.Infof("fredContextStorage.UpdateSessionContext took %v", opDuration)
+				writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.UpdateSessionContext", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
 				if errUpdateCtx != nil {
 					// Log warning instead of fatal, maybe allow continuation?
 					log.Errorf("Failed to update tokenized session context: %v", errUpdateCtx)
@@ -182,7 +260,9 @@ func main() {
 			}
 		} // End of message loop
 
-		log.Infof("Total processing time for scenario '%s' using '%s' context method: %v", scen.Name, contextMethod, time.Since(scenarioProcessingStartTime))
+		totalScenarioProcessingDuration := time.Since(scenarioProcessingStartTime)
+		log.Infof("Total processing time for scenario '%s' using '%s' context method: %v", scen.Name, contextMethod, totalScenarioProcessingDuration)
+		writeOperationToCsv(csvWriter, scenarioProcessingStartTime, "TotalScenarioProcessing", totalScenarioProcessingDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageCount: %d", len(scen.Messages)))
 
 		// Prompt for session deletion (optional)
 		if sessionID != "" {
