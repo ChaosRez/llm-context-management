@@ -2,3 +2,4 @@
 go.sum
 sessions.db
 fred/db/*
+testdata/log/*
