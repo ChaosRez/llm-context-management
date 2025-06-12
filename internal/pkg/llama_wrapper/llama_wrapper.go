@@ -106,6 +106,7 @@ func (c *LlamaClient) Completion(req map[string]interface{}) (map[string]interfa
 	// log.Debugf("LlamaClient.Completion prompt: %s", req["prompt"])
 	var res map[string]interface{}
 	err := c.doRequest("POST", "/completion", req, &res)
+	log.Debugf("Compeltion response: %v", res)
 	return res, err
 }
 
