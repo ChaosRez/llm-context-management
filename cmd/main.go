@@ -87,6 +87,8 @@ func main() {
 		}
 		log.Infof("Using '%s' context retrieval method for this scenario.", contextMethod)
 
+		scenarioProcessingStartTime := time.Now() // Start timing after context method selection
+
 		// Scenario loop (from yaml)
 		for _, message := range scen.Messages {
 			fmt.Printf("\nProcessing message: %s\n", message)
@@ -179,6 +181,8 @@ func main() {
 				log.Warn("Received nil or empty response content.")
 			}
 		} // End of message loop
+
+		log.Infof("Total processing time for scenario '%s' using '%s' context method: %v", scen.Name, contextMethod, time.Since(scenarioProcessingStartTime))
 
 		// Prompt for session deletion (optional)
 		if sessionID != "" {
