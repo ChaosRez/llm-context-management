@@ -48,11 +48,8 @@ func main() {
 	const llamaURL = "http://localhost:8080"
 	const redisAddr = "localhost:6379"
 	// const redisAddr = "localhost:6379"
-	const fredAddr = "127.0.0.1:10000" // FIXME:
-	const fredKeygroup = "llm_sessions_main"
-	const fredUseStrongConsistency = false // consistency setting
-	const fredCreateKeygroup = true        // Attempt to create keygroup if not exists
-	const fredBootstrapNode = "nodeA"      // FIXME Node to use for keygroup creation
+	const fredAddr = "141.23.28.210:9001" //"localhost:9001" // FIXME:
+	const fredKeygroup = "qwen15test"     // NOTE: we isolate models's sessions by keygroup
 	const fredCreateKeygroup = true       // Attempt to create keygroup if not exists
 	const serverListenAddr = ":8081"
 	const scenarioFilePath = "testdata/example_ruby.yml" // only in scenario mode
