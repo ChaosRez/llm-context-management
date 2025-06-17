@@ -53,8 +53,10 @@ func main() {
 	const fredUseStrongConsistency = false // consistency setting
 	const fredCreateKeygroup = true        // Attempt to create keygroup if not exists
 	const fredBootstrapNode = "nodeA"      // FIXME Node to use for keygroup creation
+	const fredCreateKeygroup = true       // Attempt to create keygroup if not exists
 	const serverListenAddr = ":8081"
 	const scenarioFilePath = "testdata/example_ruby.yml" // only in scenario mode
+	const rawHistoryLength = 20
 
 	// --- Initialize common services ---
 	sessionManager := SessionManager.NewSQLiteSessionManager(dbPath)
