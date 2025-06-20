@@ -164,6 +164,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	var finalPrompt string // Store the final prompt sent to Llama for logging/history
+	var tokenizedContext []int
 
 	if clientReq.Mode == "raw" {
 		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
@@ -183,20 +184,28 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	} else if clientReq.Mode == "tokenized" {
 		log.Infof("Using 'tokenized' context retrieval for session %s", clientReq.SessionID)
 		getTokenCtxStartTime := time.Now()
-		tokenizedContext, errCtx := s.contextStorage.GetTokenizedSessionContext(clientReq.SessionID)
+		var errCtx error
+		tokenizedContext, errCtx = s.contextStorage.GetTokenizedSessionContext(clientReq.SessionID)
 		log.Debugf("s.contextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTokenCtxStartTime))
-		if errCtx != nil { // Note: GetTokenizedSessionContext already logs details internally
-			log.Warnf("Failed to get tokenized session context for %s (proceeding without, error: %v)", clientReq.SessionID, errCtx)
+
+		if errCtx != nil {
+			if !s.contextStorage.IsNotFoundError(errCtx) {
+				log.Warnf("Failed to get tokenized session context for %s (proceeding without): %v", clientReq.SessionID, errCtx)
+			} else {
+				log.Infof("No existing tokenized context found for session %s, starting fresh.", clientReq.SessionID)
+			}
+			tokenizedContext = []int{} // Initialize to empty if error or not found
 		} else if tokenizedContext != nil {
 			log.Infof("Retrieved tokenized context (length %d) for session %s", len(tokenizedContext), clientReq.SessionID)
 		} else {
-			log.Infof("No existing tokenized context found for session %s, proceeding without.", clientReq.SessionID)
+			log.Infof("No existing tokenized context found for session %s, starting fresh.", clientReq.SessionID)
+			tokenizedContext = []int{} // Initialize to empty if nil
 		}
 
 		finalPrompt = clientReq.Prompt
 		llamaReq["prompt"] = finalPrompt
 		// Add the retrieved tokenized context if available
-		if tokenizedContext != nil {
+		if len(tokenizedContext) > 0 {
 			llamaReq["context"] = tokenizedContext // This key is added internally, not accepted from client
 			log.Debugf("Added tokenized context to Llama request for session %s", clientReq.SessionID)
 		}
@@ -218,23 +227,33 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
-	addUserMsgStartTime := time.Now()
-	// --- Add user message to session history ---
-	// Note: We add the *original* user prompt (clientReq.Prompt), not the potentially context-prepended one (finalPrompt)
-	_, err = s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model)
-	log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, time.Since(addUserMsgStartTime))
-	if err != nil {
-		// NOTE Log error but continue processing the response
-		log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
-	} else {
-		log.Debugf("Added user message to session %s", clientReq.SessionID)
-	}
-
-	// --- Process and add assistant response to session history ---
-	assistantMsg := "" // Initialize empty
+	// --- Process response and update history/context based on mode ---
+	assistantMsg := ""
 	if resp != nil {
 		if content, ok := resp["content"].(string); ok {
 			assistantMsg = content
+		} else {
+			log.Warnf("Llama response for session %s did not contain a string 'content' field.", clientReq.SessionID)
+		}
+	} else {
+		log.Warnf("Llama service returned nil response map for session %s.", clientReq.SessionID)
+		resp = make(map[string]interface{}) // Initialize if nil to avoid nil pointer below
+	}
+
+	if clientReq.Mode == "raw" {
+		// --- Add user message to session history ---
+		addUserMsgStartTime := time.Now()
+		_, err = s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model)
+		log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, time.Since(addUserMsgStartTime))
+		if err != nil {
+			// NOTE Log error but continue processing the response
+			log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
+		} else {
+			log.Debugf("Added user message to session %s", clientReq.SessionID)
+		}
+
+		// --- Add assistant response to session history ---
+		if assistantMsg != "" {
 			addAssistantMsgStartTime := time.Now()
 			_, err = s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model)
 			log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, time.Since(addAssistantMsgStartTime))
@@ -244,25 +263,38 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			} else {
 				log.Debugf("Added assistant message to session %s", clientReq.SessionID)
 			}
-		} else {
-			log.Warnf("Llama response for session %s did not contain a string 'content' field.", clientReq.SessionID)
 		}
-	} else {
-		log.Warnf("Llama service returned nil response map for session %s.", clientReq.SessionID)
-		resp = make(map[string]interface{}) // Initialize if nil to avoid nil pointer below
-	}
+	} else if clientReq.Mode == "tokenized" {
+		// In tokenized mode, we update the context in FReD instead of writing to the DB.
+		if assistantMsg != "" {
+			newUserInteractionText := fmt.Sprintf("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s<|im_end|>\n", clientReq.Prompt, assistantMsg)
 
-	// --- Update tokenized context in Redis (regardless of mode, as it uses DB history) ---
-	// This should happen *after* both user and assistant messages are added to the DB.
-	updateCtxStartTime := time.Now()
-	//FIXME err = s.contextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
-	// UpdateSessionContext has internal detailed timing, log overall here
-	log.Debugf("s.contextStorage.UpdateSessionContext (overall) for session %s took %s", clientReq.SessionID, time.Since(updateCtxStartTime))
-	if err != nil {
-		// Log warning, similar to scenario mode, don't fail the request
-		log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, err)
-	} else {
-		log.Infof("Updated tokenized context for session %s", clientReq.SessionID)
+			tokenizeNewOpStartTime := time.Now()
+			newInteractionTokens, errTokenize := s.llamaService.Tokenize(newUserInteractionText)
+			log.Debugf("s.llamaService.Tokenize (new interaction) for session %s took %s", clientReq.SessionID, time.Since(tokenizeNewOpStartTime))
+
+			if errTokenize != nil {
+				log.Errorf("Failed to tokenize new interaction for session %s: %v", clientReq.SessionID, errTokenize)
+			} else {
+				if tokenizedContext == nil {
+					tokenizedContext = []int{}
+				}
+				updatedFullTokenizedContext := append(tokenizedContext, newInteractionTokens...)
+
+				updateCtxOpStartTime := time.Now()
+				errUpdateCtx := s.contextStorage.UpdateSessionContext(clientReq.SessionID, updatedFullTokenizedContext)
+				log.Debugf("s.contextStorage.UpdateSessionContext for session %s took %s", clientReq.SessionID, time.Since(updateCtxOpStartTime))
+
+				if errUpdateCtx != nil {
+					log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, errUpdateCtx)
+				} else {
+					log.Infof("Updated tokenized context for session %s, new total length: %d", clientReq.SessionID, len(updatedFullTokenizedContext))
+				}
+			}
+		} else {
+			log.Warnf("Llama service returned nil response map for session %s.", clientReq.SessionID)
+			//resp = make(map[string]interface{}) // Initialize if nil to avoid nil pointer below
+		}
 	}
 
 	// --- Add session_id, user_id, and mode to the response ---
