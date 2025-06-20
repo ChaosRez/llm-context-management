@@ -154,21 +154,21 @@ func main() {
 		scenarioProcessingStartTime := time.Now() // Start timing after context method selection
 
 		// Scenario loop (from yaml)
+		var currentTokenizedContext []int // Declare here to persist across iterations for tokenized mode
+
 		for i, message := range scen.Messages {
-			fmt.Printf("\nProcessing message: %s\n", message)
+			fmt.Printf("Processing message: %s\n", message)
 
 			var req map[string]interface{}
 			var prompt string
-			var textContext string
-			var tokenizedContext []int
+			var textContext string // Only used in raw mode
 			var errCtx error
 			var opStartTime time.Time
 			var opDuration time.Duration
 
 			if contextMethod == "raw" {
-				const rawHistoryLength = 20 // Or make configurable
 				opStartTime = time.Now()
-				textContext, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength)
+				textContext, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength) // textContext is local
 				opDuration = time.Since(opStartTime)
 				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", opDuration)
 				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.GetTextSessionContext (raw)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, HistoryLength: %d", i, rawHistoryLength))
@@ -185,20 +185,29 @@ func main() {
 				}
 			} else { // contextMethod == "tokenized"
 				opStartTime = time.Now()
-				tokenizedContext, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
-				opDuration = time.Since(opStartTime)
-				log.Infof("fredContextStorage.GetTokenizedSessionContext took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetTokenizedSessionContext", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
-				// Allow proceeding even if context doesn't exist yet (first message)
-				if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
-					log.Warnf("Failed to get tokenized session context (proceeding without): %v", errCtx)
-				} else if errCtx == nil && tokenizedContext != nil {
-					log.Debugf("Retrieved tokenized context for session %s", sessionID)
+				// GetTokenizedSessionContext is called only once at the beginning if currentTokenizedContext is nil (first message)
+				if i == 0 {
+					var fetchedTokens []int
+					fetchedTokens, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
+					opDuration = time.Since(opStartTime)
+					log.Infof("fredContextStorage.GetTokenizedSessionContext (initial) took %v", opDuration)
+					writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetTokenizedSessionContext (initial)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
+					if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
+						log.Warnf("Failed to get tokenized session context (proceeding without): %v", errCtx)
+						currentTokenizedContext = []int{} // Initialize to empty if error but not NotFound
+					} else if errCtx == nil && fetchedTokens != nil {
+						currentTokenizedContext = fetchedTokens
+						log.Debugf("Retrieved initial tokenized context for session %s, length: %d", sessionID, len(currentTokenizedContext))
+					} else {
+						currentTokenizedContext = []int{} // Initialize to empty if not found or nil
+						log.Infof("No existing tokenized context found for session %s, starting fresh.", sessionID)
+					}
 				} else {
-					log.Infof("No existing tokenized context found for session %s, proceeding without.", sessionID)
+					// For subsequent messages, currentTokenizedContext already holds the context from previous iteration
+					log.Debugf("Using existing tokenized context for session %s, length: %d", sessionID, len(currentTokenizedContext))
 				}
 
-				prompt = message
+				prompt = message // For tokenized mode, prompt is just the new user message
 				req = map[string]interface{}{
 					"model":       scen.ModelName,
 					"prompt":      prompt,
@@ -206,8 +215,8 @@ func main() {
 					"seed":        123,
 					"stream":      false,
 				}
-				if tokenizedContext != nil {
-					req["context"] = tokenizedContext
+				if len(currentTokenizedContext) > 0 { // only add context if it's not empty
+					req["context"] = currentTokenizedContext
 				}
 			}
 
@@ -220,39 +229,69 @@ func main() {
 				log.Fatalf("Completion error: %v", errCompletion)
 			}
 
-			opStartTime = time.Now()
-			_, errAddMsg := sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
-			opDuration = time.Since(opStartTime)
-			log.Infof("sessionManager.AddMessage (user) took %v", opDuration)
-			writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (user)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: user, MessageChars: %d", i, len(message)))
-			if errAddMsg != nil {
-				log.Errorf("Failed to add user message: %v", errAddMsg)
+			if contextMethod == "raw" {
+				opStartTime = time.Now()
+				_, errAddMsg := sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
+				opDuration = time.Since(opStartTime)
+				log.Infof("sessionManager.AddMessage (user) took %v", opDuration)
+				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (user)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: user, MessageChars: %d", i, len(message)))
+				if errAddMsg != nil {
+					log.Errorf("Failed to add user message: %v", errAddMsg)
+				}
 			}
 
 			// Process and add assistant response to session
 			if resp != nil && resp["content"] != nil {
 				assistantMsg := fmt.Sprintf("%v", resp["content"])
 				fmt.Printf("Response: \n%s\n", assistantMsg)
-				opStartTime = time.Now()
-				_, errAddMsg = sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
-				opDuration = time.Since(opStartTime)
-				log.Infof("sessionManager.AddMessage (assistant) took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (assistant)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: assistant, MessageChars: %d", i, len(assistantMsg)))
-				if errAddMsg != nil {
-					log.Errorf("Failed to add assistant message: %v", errAddMsg)
+				if contextMethod == "raw" {
+					opStartTime = time.Now()
+					_, errAddMsg := sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
+					opDuration = time.Since(opStartTime)
+					log.Infof("sessionManager.AddMessage (assistant) took %v", opDuration)
+					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (assistant)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: assistant, MessageChars: %d", i, len(assistantMsg)))
+					if errAddMsg != nil {
+						log.Errorf("Failed to add assistant message: %v", errAddMsg)
+					}
 				}
 
 				// Update tokenized context in context store *after* adding both messages
-				opStartTime = time.Now()
-				errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, sessionManager, llamaService)
-				opDuration = time.Since(opStartTime)
-				log.Infof("fredContextStorage.UpdateSessionContext took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.UpdateSessionContext", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
-				if errUpdateCtx != nil {
-					// Log warning instead of fatal, maybe allow continuation?
-					log.Errorf("Failed to update tokenized session context: %v", errUpdateCtx)
-				} else {
-					log.Infof("Updated tokenized context for session %s", sessionID)
+				if contextMethod == "tokenized" {
+					// Construct the text for the new interaction part
+					// This format should match how the initial context was (or would have been) tokenized.
+					// Assuming the format is: <|im_start|>user\nUSER_MSG<|im_end|>\n<|im_start|>assistant\nASSISTANT_MSG<|im_end|>\n
+					newUserInteractionText := fmt.Sprintf("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s<|im_end|>\n", message, assistantMsg)
+
+					tokenizeNewOpStartTime := time.Now()
+					newInteractionTokens, errTokenize := llamaService.Tokenize(newUserInteractionText)
+					tokenizeNewOpDuration := time.Since(tokenizeNewOpStartTime)
+					log.Infof("llamaService.Tokenize (new interaction) took %v", tokenizeNewOpDuration)
+					writeOperationToCsv(csvWriter, tokenizeNewOpStartTime, "llamaService.Tokenize (new interaction)", tokenizeNewOpDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Chars: %d", i, len(newUserInteractionText)))
+
+					if errTokenize != nil {
+						log.Errorf("Failed to tokenize new interaction for session %s: %v", sessionID, errTokenize)
+						// Decide how to handle: skip update, clear cache, etc. For now, log and continue.
+					} else {
+						if currentTokenizedContext == nil { // Should have been initialized to []int{} earlier
+							currentTokenizedContext = []int{}
+						}
+						// Append new tokens to the existing context // FIXME: bad templating?
+						updatedFullTokenizedContext := append(currentTokenizedContext, newInteractionTokens...)
+
+						updateCtxOpStartTime := time.Now()
+						// Pass the complete, updated tokenized context to FReD
+						errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, updatedFullTokenizedContext)
+						updateCtxOpDuration := time.Since(updateCtxOpStartTime)
+						log.Infof("fredContextStorage.UpdateSessionContext took %v", updateCtxOpDuration)
+						writeOperationToCsv(csvWriter, updateCtxOpStartTime, "fredContextStorage.UpdateSessionContext", updateCtxOpDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, TotalTokens: %d", i, len(updatedFullTokenizedContext)))
+
+						if errUpdateCtx != nil {
+							log.Fatalf("Failed to update tokenized session context: %v", errUpdateCtx)
+						} else {
+							currentTokenizedContext = updatedFullTokenizedContext // Persist for next iteration
+							log.Infof("Updated tokenized context for session %s, new total length: %d", sessionID, len(currentTokenizedContext))
+						}
+					}
 				}
 			} else {
 				log.Warn("Received nil or empty response content.")

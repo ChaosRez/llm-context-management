@@ -12,6 +12,7 @@ import (
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
 )
 
+// TODO: *update the code to match FReD's simple implementation (no use of llama or session manager directly)
 const maxMessagesForUpdate = 10000 // TODO consider making maxMessages configurable or using a constant
 
 type RedisContextStorage struct {

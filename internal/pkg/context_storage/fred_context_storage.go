@@ -14,18 +14,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	SessionManager "llm-context-management/internal/app/session_manager"
 	fredClient "llm-context-management/internal/pkg/fredclient"
-	Llama "llm-context-management/internal/pkg/llama_wrapper"
 )
 
 const (
 	// DefaultKeygroup is the FReD keygroup where session contexts will be stored.
-	defaultFredKeygroup      = "default-llm-model"
-	userID                   = "context-manager"
-	maxMessagesForFredUpdate = 10000 // Similar to Redis implementation
-	expiry                   = 0     // 0 = no expiry time for FReD keygroup upon creation
-	mutable                  = true  // Keygroups are mutable by default
+	defaultFredKeygroup = "default-llm-model"
+	userID              = "context-manager"
+	expiry              = 0    // 0 = no expiry time for FReD keygroup upon creation
+	mutable             = true // Keygroups are mutable by default
 )
 
 // ErrFredNotFound is returned when a key is not found in FReD.
@@ -330,8 +327,8 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 	return tokens, nil
 }
 
-// UpdateSessionContext generates the tokenized context from session history and stores it in FReD.
-func (f *FReDContextStorage) UpdateSessionContext(sessionID string, sessionManager *SessionManager.SQLiteSessionManager, llamaService *Llama.LlamaClient) error {
+// UpdateSessionContext stores the provided tokenized context in FReD.
+func (f *FReDContextStorage) UpdateSessionContext(sessionID string, newFullTokenizedContext []int) error {
 	startTime := time.Now()
 	defer func() {
 		log.Infof("FReD: UpdateSessionContext for session %s took %s", sessionID, time.Since(startTime))
@@ -339,40 +336,23 @@ func (f *FReDContextStorage) UpdateSessionContext(sessionID string, sessionManag
 
 	log.Infof("FReD: Updating tokenized context cache for session ID: %s in keygroup: %s", sessionID, f.keygroup)
 
-	getTextContextStartTime := time.Now()
-	rawTextContext, err := sessionManager.GetTextSessionContext(sessionID, maxMessagesForFredUpdate)
-	log.Debugf("FReD: GetTextSessionContext for session %s (update) took %s", sessionID, time.Since(getTextContextStartTime))
-	if err != nil {
-		log.Errorf("FReD: Failed to retrieve text context for session ID %s during update: %v", sessionID, err)
-		return fmt.Errorf("failed to retrieve text context for FReD update: %w", err)
+	var tokenBytes []byte
+	var err error
+
+	if newFullTokenizedContext == nil {
+		// This case might occur if we intend to clear the cache with an empty list.
+		// Or, if it's an error state, the caller should handle it.
+		// For now, assume nil means store an empty list.
+		log.Warnf("FReD: newFullTokenizedContext is nil for session ID %s. Caching empty token list.", sessionID)
+		newFullTokenizedContext = []int{}
 	}
 
-	var tokenBytes []byte
-	if rawTextContext == "" {
-		log.Warnf("FReD: No messages found for session ID %s during update. Caching empty token list.", sessionID)
-		marshalStartTime := time.Now()
-		tokenBytes, err = json.Marshal([]int{}) // Store empty list as "[]"
-		log.Debugf("FReD: JSON marshal for empty token list (session %s) took %s", sessionID, time.Since(marshalStartTime))
-		if err != nil {
-			log.Errorf("FReD: Failed to marshal empty token list for session ID %s: %v", sessionID, err)
-			return fmt.Errorf("failed to marshal empty token list for FReD: %w", err)
-		}
-	} else {
-		tokenizeStartTime := time.Now()
-		tokens, errTokenize := llamaService.Tokenize(rawTextContext)
-		log.Debugf("FReD: Tokenization for session %s (update) took %s", sessionID, time.Since(tokenizeStartTime))
-		if errTokenize != nil {
-			log.Errorf("FReD: Failed to tokenize context for session ID %s: %v", sessionID, errTokenize)
-			return fmt.Errorf("failed to tokenize context for FReD: %w", errTokenize)
-		}
-
-		marshalStartTime := time.Now()
-		tokenBytes, err = json.Marshal(tokens)
-		log.Debugf("FReD: JSON marshal for tokens (session %s) took %s", sessionID, time.Since(marshalStartTime))
-		if err != nil {
-			log.Errorf("FReD: Failed to marshal tokens for FReD caching for session ID %s: %v", sessionID, err)
-			return fmt.Errorf("failed to marshal tokens for FReD: %w", err)
-		}
+	marshalStartTime := time.Now()
+	tokenBytes, err = json.Marshal(newFullTokenizedContext)
+	log.Debugf("FReD: JSON marshal for newFullTokenizedContext (session %s) took %s", sessionID, time.Since(marshalStartTime))
+	if err != nil {
+		log.Errorf("FReD: Failed to marshal tokens for FReD caching for session ID %s: %v", sessionID, err)
+		return fmt.Errorf("failed to marshal tokens for FReD: %w", err)
 	}
 
 	dataToStore := string(tokenBytes)
