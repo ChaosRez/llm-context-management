@@ -11,8 +11,7 @@ ETCD_IP=$ETCD_NODE_IP
         --nodeID fredjetson \
         --nase-host "$ETCD_IP:2379" \
         --nase-cached \
-        --adaptor badgerdb \
-        --badgerdb-path ./db \
+        --adaptor memory \
         --host 0.0.0.0:9001 \
         --advertise-host "$EDGE_IP:9001" \
         --peer-host 0.0.0.0:5555 \
