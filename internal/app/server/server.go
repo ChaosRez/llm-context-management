@@ -255,7 +255,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	// --- Update tokenized context in Redis (regardless of mode, as it uses DB history) ---
 	// This should happen *after* both user and assistant messages are added to the DB.
 	updateCtxStartTime := time.Now()
-	err = s.contextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
+	//FIXME err = s.contextStorage.UpdateSessionContext(clientReq.SessionID, s.sessionManager, s.llamaService)
 	// UpdateSessionContext has internal detailed timing, log overall here
 	log.Debugf("s.contextStorage.UpdateSessionContext (overall) for session %s took %s", clientReq.SessionID, time.Since(updateCtxStartTime))
 	if err != nil {
