@@ -9,6 +9,7 @@ import (
 	ContextStorage "llm-context-management/internal/pkg/context_storage"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -21,6 +22,8 @@ type Server struct {
 	llamaService   *Llama.LlamaClient
 	sessionManager *SessionManager.SQLiteSessionManager // NOTE Assuming SQLite
 	contextStorage ContextStorage.ContextStorage
+	sessionLocks   map[string]*sync.Mutex
+	locksMutex     sync.RWMutex
 }
 
 // NewServer creates a new Server instance.
@@ -33,6 +36,7 @@ func NewServer(
 		llamaService:   llama,
 		sessionManager: sm,
 		contextStorage: cs,
+		sessionLocks:   make(map[string]*sync.Mutex),
 	}
 }
 
@@ -41,6 +45,7 @@ type CompletionRequest struct {
 	Mode        string                 `json:"mode"` // "raw" or "tokenized"
 	SessionID   string                 `json:"session_id,omitempty"`
 	UserID      string                 `json:"user_id,omitempty"` // UserID field
+	Turn        int                    `json:"turn,omitempty"`    // TODO: process Client-side turn counter
 	Prompt      string                 `json:"prompt"`
 	Model       string                 `json:"model"`
 	Temperature float64                `json:"temperature"`
@@ -80,6 +85,7 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 	delete(allFields, "mode")
 	delete(allFields, "session_id")
 	delete(allFields, "user_id")
+	delete(allFields, "turn")
 	delete(allFields, "prompt")
 	delete(allFields, "model")
 	delete(allFields, "temperature")
@@ -148,6 +154,29 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("X-Session-ID", clientReq.SessionID) // Ensure it's set for defer log
 		log.Infof("Using existing session ID: %s (Effective UserID: %s)", clientReq.SessionID, effectiveUserID)
 	}
+
+	// --- Session Locking for data consistency ---
+	// Get or create a lock for the session to ensure sequential processing.
+	s.locksMutex.RLock()
+	sessionLock, ok := s.sessionLocks[clientReq.SessionID]
+	s.locksMutex.RUnlock()
+
+	if !ok {
+		s.locksMutex.Lock()
+		// Double-check in case another goroutine created it while we were waiting for the write lock.
+		if _, ok := s.sessionLocks[clientReq.SessionID]; !ok {
+			s.sessionLocks[clientReq.SessionID] = &sync.Mutex{}
+			log.Debugf("Created new mutex for session %s", clientReq.SessionID)
+		}
+		sessionLock = s.sessionLocks[clientReq.SessionID]
+		s.locksMutex.Unlock()
+	}
+
+	log.Debugf("Acquiring lock for session %s", clientReq.SessionID)
+	lockAcquireStartTime := time.Now()
+	sessionLock.Lock() // Block until the previous operation on this session is complete.
+	log.Infof("Lock acquired for session %s (waited %s)", clientReq.SessionID, time.Since(lockAcquireStartTime))
+	// The lock will be released in the async update goroutine.
 
 	llamaReq := make(map[string]interface{})
 
@@ -227,7 +256,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
 
-	// --- Process response and update history/context based on mode ---
+	// --- Process response ---
 	assistantMsg := ""
 	if resp != nil {
 		if content, ok := resp["content"].(string); ok {
@@ -240,62 +269,10 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		resp = make(map[string]interface{}) // Initialize if nil to avoid nil pointer below
 	}
 
-	if clientReq.Mode == "raw" {
-		// --- Add user message to session history ---
-		addUserMsgStartTime := time.Now()
-		_, err = s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model)
-		log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, time.Since(addUserMsgStartTime))
-		if err != nil {
-			// NOTE Log error but continue processing the response
-			log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
-		} else {
-			log.Debugf("Added user message to session %s", clientReq.SessionID)
-		}
-
-		// --- Add assistant response to session history ---
-		if assistantMsg != "" {
-			addAssistantMsgStartTime := time.Now()
-			_, err = s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model)
-			log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, time.Since(addAssistantMsgStartTime))
-			if err != nil {
-				// NOTE Log error but continue processing the response
-				log.Errorf("Failed to add assistant message for session %s: %v", clientReq.SessionID, err)
-			} else {
-				log.Debugf("Added assistant message to session %s", clientReq.SessionID)
-			}
-		}
-	} else if clientReq.Mode == "tokenized" {
-		// In tokenized mode, we update the context in FReD instead of writing to the DB.
-		if assistantMsg != "" {
-			newUserInteractionText := fmt.Sprintf("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s<|im_end|>\n", clientReq.Prompt, assistantMsg)
-
-			tokenizeNewOpStartTime := time.Now()
-			newInteractionTokens, errTokenize := s.llamaService.Tokenize(newUserInteractionText)
-			log.Debugf("s.llamaService.Tokenize (new interaction) for session %s took %s", clientReq.SessionID, time.Since(tokenizeNewOpStartTime))
-
-			if errTokenize != nil {
-				log.Errorf("Failed to tokenize new interaction for session %s: %v", clientReq.SessionID, errTokenize)
-			} else {
-				if tokenizedContext == nil {
-					tokenizedContext = []int{}
-				}
-				updatedFullTokenizedContext := append(tokenizedContext, newInteractionTokens...)
-
-				updateCtxOpStartTime := time.Now()
-				errUpdateCtx := s.contextStorage.UpdateSessionContext(clientReq.SessionID, updatedFullTokenizedContext)
-				log.Debugf("s.contextStorage.UpdateSessionContext for session %s took %s", clientReq.SessionID, time.Since(updateCtxOpStartTime))
-
-				if errUpdateCtx != nil {
-					log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, errUpdateCtx)
-				} else {
-					log.Infof("Updated tokenized context for session %s, new total length: %d", clientReq.SessionID, len(updatedFullTokenizedContext))
-				}
-			}
-		} else {
-			log.Warnf("Llama service returned nil response map for session %s.", clientReq.SessionID)
-			//resp = make(map[string]interface{}) // Initialize if nil to avoid nil pointer below
-		}
-	}
+	// --- Asynchronously update history and context ---
+	// This is done in a goroutine to avoid making the client wait.
+	// The lock for the session is passed to the goroutine and released there.
+	go s.updateHistoryAndContextAsync(clientReq, assistantMsg, tokenizedContext, sessionLock)
 
 	// --- Add session_id, user_id, and mode to the response ---
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
@@ -311,6 +288,77 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Errorf("Failed to write response for session %s: %v (took %s)", clientReq.SessionID, err, time.Since(encodeStartTime))
 	} else {
 		log.Infof("Successfully sent completion response for session %s (encoding took %s)", clientReq.SessionID, time.Since(encodeStartTime))
+	}
+}
+
+// updateHistoryAndContextAsync handles the saving of conversation history and context
+// in the background to avoid blocking the client response.
+func (s *Server) updateHistoryAndContextAsync(
+	clientReq CompletionRequest,
+	assistantMsg string,
+	initialTokenizedContext []int,
+	sessionLock *sync.Mutex,
+) {
+	// Recover from potential panics in the goroutine to prevent server crash
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Recovered in updateHistoryAndContextAsync for session %s: %v", clientReq.SessionID, r)
+		}
+		sessionLock.Unlock()
+		log.Infof("Lock released for session %s", clientReq.SessionID)
+	}()
+
+	log.Infof("Starting async history/context update for session %s", clientReq.SessionID)
+
+	if clientReq.Mode == "raw" {
+		// --- Add user message to session history ---
+		addUserMsgStartTime := time.Now()
+		if _, err := s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model); err != nil {
+			log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
+		} else {
+			log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, time.Since(addUserMsgStartTime))
+		}
+
+		// --- Add assistant response to session history ---
+		if assistantMsg != "" {
+			addAssistantMsgStartTime := time.Now()
+			if _, err := s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model); err != nil {
+				log.Errorf("Failed to add assistant message for session %s: %v", clientReq.SessionID, err)
+			} else {
+				log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, time.Since(addAssistantMsgStartTime))
+			}
+		}
+	} else if clientReq.Mode == "tokenized" {
+		if assistantMsg == "" {
+			log.Warnf("No assistant message to process for tokenized context update in session %s.", clientReq.SessionID)
+			return
+		}
+
+		newUserInteractionText := fmt.Sprintf("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s<|im_end|>\n", clientReq.Prompt, assistantMsg)
+
+		tokenizeNewOpStartTime := time.Now()
+		newInteractionTokens, errTokenize := s.llamaService.Tokenize(newUserInteractionText)
+		log.Debugf("s.llamaService.Tokenize (new interaction) for session %s took %s", clientReq.SessionID, time.Since(tokenizeNewOpStartTime))
+
+		if errTokenize != nil {
+			log.Errorf("Failed to tokenize new interaction for session %s: %v", clientReq.SessionID, errTokenize)
+			return // Cannot proceed without tokens
+		}
+
+		if initialTokenizedContext == nil {
+			initialTokenizedContext = []int{}
+		}
+		updatedFullTokenizedContext := append(initialTokenizedContext, newInteractionTokens...)
+
+		updateCtxOpStartTime := time.Now()
+		errUpdateCtx := s.contextStorage.UpdateSessionContext(clientReq.SessionID, updatedFullTokenizedContext)
+		log.Debugf("s.contextStorage.UpdateSessionContext for session %s took %s", clientReq.SessionID, time.Since(updateCtxOpStartTime))
+
+		if errUpdateCtx != nil {
+			log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, errUpdateCtx)
+		} else {
+			log.Infof("Updated tokenized context for session %s, new total length: %d", clientReq.SessionID, len(updatedFullTokenizedContext))
+		}
 	}
 }
 
