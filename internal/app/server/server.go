@@ -45,7 +45,7 @@ type CompletionRequest struct {
 	Mode        string                 `json:"mode"` // "raw" or "tokenized"
 	SessionID   string                 `json:"session_id,omitempty"`
 	UserID      string                 `json:"user_id,omitempty"` // UserID field
-	Turn        int                    `json:"turn,omitempty"`    // TODO: process Client-side turn counter
+	Turn        int                    `json:"turn"`              // Client-side turn counter, must be >= 1
 	Prompt      string                 `json:"prompt"`
 	Model       string                 `json:"model"`
 	Temperature float64                `json:"temperature"`
@@ -178,6 +178,15 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	log.Infof("Lock acquired for session %s (waited %s)", clientReq.SessionID, time.Since(lockAcquireStartTime))
 	// The lock will be released in the async update goroutine.
 
+	// Validate turn number
+	if clientReq.Turn < 1 {
+		log.Errorf("Invalid turn number for session %s. Client turn: %d", clientReq.SessionID, clientReq.Turn)
+		http.Error(w, "Invalid turn number. Must be >= 1.", http.StatusBadRequest)
+		sessionLock.Unlock()
+		log.Infof("Lock released for session %s due to invalid turn", clientReq.SessionID)
+		return
+	}
+
 	llamaReq := make(map[string]interface{})
 
 	// Copy explicitly known parameters
@@ -198,13 +207,25 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	if clientReq.Mode == "raw" {
 		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
 		getTextCtxStartTime := time.Now()
-		textContext, errCtx := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
+		textContext, currentTurn, errCtx := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
 		log.Debugf("s.sessionManager.GetTextSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTextCtxStartTime))
 		if errCtx != nil {
 			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, errCtx)
 			http.Error(w, "Failed to retrieve session context", http.StatusInternalServerError)
+			sessionLock.Unlock()
+			log.Infof("Lock released for session %s due to context retrieval error", clientReq.SessionID)
 			return
 		}
+
+		// Turn validation
+		if clientReq.Turn != currentTurn+1 {
+			log.Errorf("Turn mismatch for session %s. Client turn: %d, Server turn: %d", clientReq.SessionID, clientReq.Turn, currentTurn)
+			http.Error(w, fmt.Sprintf("Turn mismatch. Expected turn %d, but got %d.", currentTurn+1, clientReq.Turn), http.StatusConflict)
+			sessionLock.Unlock()
+			log.Warnf("Lock released for session %s due to turn mismatch", clientReq.SessionID)
+			return
+		}
+
 		// Construct the prompt including context and user message for Llama.cpp
 		finalPrompt = textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
 		llamaReq["prompt"] = finalPrompt
@@ -214,7 +235,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Infof("Using 'tokenized' context retrieval for session %s", clientReq.SessionID)
 		getTokenCtxStartTime := time.Now()
 		var errCtx error
-		tokenizedContext, errCtx = s.contextStorage.GetTokenizedSessionContext(clientReq.SessionID)
+		var currentTurn int
+		tokenizedContext, currentTurn, errCtx = s.contextStorage.GetTokenizedSessionContext(clientReq.SessionID)
 		log.Debugf("s.contextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTokenCtxStartTime))
 
 		if errCtx != nil {
@@ -224,11 +246,22 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 				log.Infof("No existing tokenized context found for session %s, starting fresh.", clientReq.SessionID)
 			}
 			tokenizedContext = []int{} // Initialize to empty if error or not found
+			currentTurn = 0            // For a new session, turn is 0
 		} else if tokenizedContext != nil {
-			log.Infof("Retrieved tokenized context (length %d) for session %s", len(tokenizedContext), clientReq.SessionID)
+			log.Infof("Retrieved tokenized context (length %d, turn %d) for session %s", len(tokenizedContext), currentTurn, clientReq.SessionID)
 		} else {
 			log.Infof("No existing tokenized context found for session %s, starting fresh.", clientReq.SessionID)
 			tokenizedContext = []int{} // Initialize to empty if nil
+			currentTurn = 0            // For a new session, turn is 0
+		}
+
+		// Turn validation
+		if clientReq.Turn != currentTurn+1 {
+			log.Errorf("Turn mismatch for session %s. Client turn: %d, Server turn: %d", clientReq.SessionID, clientReq.Turn, currentTurn)
+			http.Error(w, fmt.Sprintf("Turn mismatch. Expected turn %d, but got %d.", currentTurn+1, clientReq.Turn), http.StatusConflict)
+			sessionLock.Unlock()
+			log.Infof("Lock released for session %s due to turn mismatch", clientReq.SessionID)
+			return
 		}
 
 		finalPrompt = clientReq.Prompt
@@ -252,6 +285,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Errorf("Llama completion error for session %s: %v", clientReq.SessionID, err)
 		http.Error(w, "Error processing completion request", http.StatusInternalServerError)
+		sessionLock.Unlock()
+		log.Warnf("Lock released for session %s due to llama completion error", clientReq.SessionID)
 		return
 	}
 	log.Infof("Received completion response from Llama service for session %s", clientReq.SessionID)
@@ -328,6 +363,12 @@ func (s *Server) updateHistoryAndContextAsync(
 				log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, time.Since(addAssistantMsgStartTime))
 			}
 		}
+		// --- Increment turn ---
+		if err := s.sessionManager.IncrementSessionTurn(clientReq.SessionID); err != nil {
+			log.Errorf("Failed to increment turn for session %s: %v", clientReq.SessionID, err)
+		} else {
+			log.Infof("Incremented turn for session %s to %d", clientReq.SessionID, clientReq.Turn)
+		}
 	} else if clientReq.Mode == "tokenized" {
 		if assistantMsg == "" {
 			log.Warnf("No assistant message to process for tokenized context update in session %s.", clientReq.SessionID)
@@ -351,13 +392,13 @@ func (s *Server) updateHistoryAndContextAsync(
 		updatedFullTokenizedContext := append(initialTokenizedContext, newInteractionTokens...)
 
 		updateCtxOpStartTime := time.Now()
-		errUpdateCtx := s.contextStorage.UpdateSessionContext(clientReq.SessionID, updatedFullTokenizedContext)
+		errUpdateCtx := s.contextStorage.UpdateSessionContext(clientReq.SessionID, updatedFullTokenizedContext, clientReq.Turn)
 		log.Debugf("s.contextStorage.UpdateSessionContext for session %s took %s", clientReq.SessionID, time.Since(updateCtxOpStartTime))
 
 		if errUpdateCtx != nil {
 			log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, errUpdateCtx)
 		} else {
-			log.Infof("Updated tokenized context for session %s, new total length: %d", clientReq.SessionID, len(updatedFullTokenizedContext))
+			log.Infof("Updated tokenized context for session %s, new total length: %d, new turn: %d", clientReq.SessionID, len(updatedFullTokenizedContext), clientReq.Turn)
 		}
 	}
 }

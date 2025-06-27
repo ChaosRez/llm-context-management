@@ -155,6 +155,7 @@ func main() {
 
 		// Scenario loop (from yaml)
 		var currentTokenizedContext []int // Declare here to persist across iterations for tokenized mode
+		var currentTurn int = 0
 
 		for i, message := range scen.Messages {
 			fmt.Printf("Processing message: %s\n", message)
@@ -168,12 +169,16 @@ func main() {
 
 			if contextMethod == "raw" {
 				opStartTime = time.Now()
-				textContext, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength) // textContext is local
+				var dbTurn int
+				textContext, dbTurn, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength) // textContext is local
 				opDuration = time.Since(opStartTime)
 				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", opDuration)
 				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.GetTextSessionContext (raw)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, HistoryLength: %d", i, rawHistoryLength))
 				if errCtx != nil {
 					log.Fatalf("Failed to get raw session context: %v", errCtx)
+				}
+				if dbTurn != currentTurn {
+					log.Fatalf("Turn mismatch in raw mode! Expected turn %d from DB, but got %d", currentTurn, dbTurn)
 				}
 				prompt = textContext + "<|im_start|>user\n" + message + "<|im_end|>\n"
 				req = map[string]interface{}{
@@ -188,23 +193,27 @@ func main() {
 				// GetTokenizedSessionContext is called only once at the beginning if currentTokenizedContext is nil (first message)
 				if i == 0 {
 					var fetchedTokens []int
-					fetchedTokens, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
+					var fredTurn int
+					fetchedTokens, fredTurn, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
 					opDuration = time.Since(opStartTime)
 					log.Infof("fredContextStorage.GetTokenizedSessionContext (initial) took %v", opDuration)
 					writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetTokenizedSessionContext (initial)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
 					if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
 						log.Warnf("Failed to get tokenized session context (proceeding without): %v", errCtx)
 						currentTokenizedContext = []int{} // Initialize to empty if error but not NotFound
+						currentTurn = 0
 					} else if errCtx == nil && fetchedTokens != nil {
 						currentTokenizedContext = fetchedTokens
-						log.Debugf("Retrieved initial tokenized context for session %s, length: %d", sessionID, len(currentTokenizedContext))
+						currentTurn = fredTurn
+						log.Debugf("Retrieved initial tokenized context for session %s, length: %d, turn: %d", sessionID, len(currentTokenizedContext), currentTurn)
 					} else {
 						currentTokenizedContext = []int{} // Initialize to empty if not found or nil
+						currentTurn = 0
 						log.Infof("No existing tokenized context found for session %s, starting fresh.", sessionID)
 					}
 				} else {
 					// For subsequent messages, currentTokenizedContext already holds the context from previous iteration
-					log.Debugf("Using existing tokenized context for session %s, length: %d", sessionID, len(currentTokenizedContext))
+					log.Debugf("Using existing tokenized context for session %s, length: %d, turn: %d", sessionID, len(currentTokenizedContext), currentTurn)
 				}
 
 				prompt = message // For tokenized mode, prompt is just the new user message
@@ -253,6 +262,16 @@ func main() {
 					if errAddMsg != nil {
 						log.Errorf("Failed to add assistant message: %v", errAddMsg)
 					}
+
+					opStartTime = time.Now()
+					errIncrement := sessionManager.IncrementSessionTurn(sessionID)
+					opDuration = time.Since(opStartTime)
+					log.Infof("sessionManager.IncrementSessionTurn took %v", opDuration)
+					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.IncrementSessionTurn", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, NewTurn: %d", i, currentTurn+1))
+					if errIncrement != nil {
+						log.Fatalf("Failed to increment turn: %v", errIncrement)
+					}
+					currentTurn++
 				}
 
 				// Update tokenized context in context store *after* adding both messages
@@ -280,16 +299,17 @@ func main() {
 
 						updateCtxOpStartTime := time.Now()
 						// Pass the complete, updated tokenized context to FReD
-						errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, updatedFullTokenizedContext)
+						errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, updatedFullTokenizedContext, currentTurn+1)
 						updateCtxOpDuration := time.Since(updateCtxOpStartTime)
 						log.Infof("fredContextStorage.UpdateSessionContext took %v", updateCtxOpDuration)
-						writeOperationToCsv(csvWriter, updateCtxOpStartTime, "fredContextStorage.UpdateSessionContext", updateCtxOpDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, TotalTokens: %d", i, len(updatedFullTokenizedContext)))
+						writeOperationToCsv(csvWriter, updateCtxOpStartTime, "fredContextStorage.UpdateSessionContext", updateCtxOpDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, TotalTokens: %d, NewTurn: %d", i, len(updatedFullTokenizedContext), currentTurn+1))
 
 						if errUpdateCtx != nil {
 							log.Fatalf("Failed to update tokenized session context: %v", errUpdateCtx)
 						} else {
 							currentTokenizedContext = updatedFullTokenizedContext // Persist for next iteration
-							log.Infof("Updated tokenized context for session %s, new total length: %d", sessionID, len(currentTokenizedContext))
+							currentTurn++
+							log.Infof("Updated tokenized context for session %s, new total length: %d, new turn: %d", sessionID, len(currentTokenizedContext), currentTurn)
 						}
 					}
 				}

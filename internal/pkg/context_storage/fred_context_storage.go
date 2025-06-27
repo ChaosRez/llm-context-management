@@ -28,6 +28,12 @@ const (
 // ErrFredNotFound is returned when a key is not found in FReD.
 var ErrFredNotFound = fmt.Errorf("key not found in FReD")
 
+// FredContextData is the structure stored as JSON in FReD.
+type FredContextData struct {
+	Context []int `json:"context"`
+	Turn    int   `json:"turn"`
+}
+
 // FReDContextStorage implements the ContextStorage interface using FReD.
 type FReDContextStorage struct {
 	client   fredClient.ClientClient
@@ -268,8 +274,8 @@ func (f *FReDContextStorage) initializeKeygroup(grpcClient fredClient.ClientClie
 	return nil
 }
 
-// GetTokenizedSessionContext retrieves the tokenized session context from FReD.
-func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int, error) {
+// GetTokenizedSessionContext retrieves the tokenized session context and turn from FReD.
+func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int, int, error) {
 	startTime := time.Now()
 	defer func() {
 		log.Debugf("FReD: GetTokenizedSessionContext for session %s took %s", sessionID, time.Since(startTime))
@@ -294,15 +300,15 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 		s, ok := status.FromError(err)
 		if ok && s.Code() == codes.NotFound {
 			log.Warnf("FReD: Cache miss (NotFound) for session ID: %s in keygroup: %s.", sessionID, f.keygroup)
-			return nil, ErrFredNotFound
+			return nil, 0, ErrFredNotFound
 		}
 		log.Errorf("FReD: Failed to read from keygroup '%s', id '%s': %v", f.keygroup, sessionID, err)
-		return nil, fmt.Errorf("failed to read from FReD: %w", err)
+		return nil, 0, fmt.Errorf("failed to read from FReD: %w", err)
 	}
 
 	if readResp == nil || len(readResp.Data) == 0 {
 		log.Warnf("FReD: Cache miss for session ID: '%s' in keygroup: '%s'. No data items returned.", sessionID, f.keygroup)
-		return nil, ErrFredNotFound // Or []int{}, nil if empty is not an error but a valid "not found" state for tokens
+		return nil, 0, ErrFredNotFound // Or []int{}, nil if empty is not an error but a valid "not found" state for tokens
 	}
 
 	if len(readResp.Data) > 1 {
@@ -310,34 +316,31 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 	}
 
 	jsonData := readResp.Data[0].Val
-	if jsonData == "" || jsonData == "[]" { // Check for empty string or empty JSON array explicitly
-		log.Infof("FReD: Cache hit for session ID: %s, but data is empty. Returning empty token list.", sessionID)
-		return []int{}, nil // Return empty slice, not an error
+	if jsonData == "" {
+		log.Warnf("FReD: Cache hit for session ID: %s, but data is empty. Returning empty context and turn 0.", sessionID)
+		return []int{}, 0, nil
 	}
 
 	log.Infof("FReD: Cache hit for session ID: %s in keygroup: %s", sessionID, f.keygroup)
 	unmarshalStartTime := time.Now()
-	var tokens []int
-	errUnmarshal := json.Unmarshal([]byte(jsonData), &tokens)
+	var data FredContextData
+	errUnmarshal := json.Unmarshal([]byte(jsonData), &data)
 	log.Debugf("FReD: JSON unmarshal for session %s took %s", sessionID, time.Since(unmarshalStartTime))
 	if errUnmarshal != nil {
-		log.Errorf("FReD: Failed to unmarshal cached tokens for session ID %s: %v. Data: %s", sessionID, errUnmarshal, jsonData)
-		return nil, fmt.Errorf("failed to unmarshal cached tokens from FReD: %w", errUnmarshal)
+		log.Errorf("FReD: Failed to unmarshal cached data for session ID %s: %v. Data: %s", sessionID, errUnmarshal, jsonData)
+		return nil, 0, fmt.Errorf("failed to unmarshal cached data from FReD: %w", errUnmarshal)
 	}
-	return tokens, nil
+	return data.Context, data.Turn, nil
 }
 
-// UpdateSessionContext stores the provided tokenized context in FReD.
-func (f *FReDContextStorage) UpdateSessionContext(sessionID string, newFullTokenizedContext []int) error {
+// UpdateSessionContext stores the provided tokenized context and new turn in FReD.
+func (f *FReDContextStorage) UpdateSessionContext(sessionID string, newFullTokenizedContext []int, newTurn int) error {
 	startTime := time.Now()
 	defer func() {
 		log.Infof("FReD: UpdateSessionContext for session %s took %s", sessionID, time.Since(startTime))
 	}()
 
-	log.Infof("FReD: Updating tokenized context cache for session ID: %s in keygroup: %s", sessionID, f.keygroup)
-
-	var tokenBytes []byte
-	var err error
+	log.Infof("FReD: Updating tokenized context cache for session ID: %s in keygroup: %s to turn %d", sessionID, f.keygroup, newTurn)
 
 	if newFullTokenizedContext == nil {
 		// This case might occur if we intend to clear the cache with an empty list.
@@ -347,12 +350,17 @@ func (f *FReDContextStorage) UpdateSessionContext(sessionID string, newFullToken
 		newFullTokenizedContext = []int{}
 	}
 
+	data := FredContextData{
+		Context: newFullTokenizedContext,
+		Turn:    newTurn,
+	}
+
 	marshalStartTime := time.Now()
-	tokenBytes, err = json.Marshal(newFullTokenizedContext)
-	log.Debugf("FReD: JSON marshal for newFullTokenizedContext (session %s) took %s", sessionID, time.Since(marshalStartTime))
+	tokenBytes, err := json.Marshal(data)
+	log.Debugf("FReD: JSON marshal for new context data (session %s) took %s", sessionID, time.Since(marshalStartTime))
 	if err != nil {
-		log.Errorf("FReD: Failed to marshal tokens for FReD caching for session ID %s: %v", sessionID, err)
-		return fmt.Errorf("failed to marshal tokens for FReD: %w", err)
+		log.Errorf("FReD: Failed to marshal data for FReD caching for session ID %s: %v", sessionID, err)
+		return fmt.Errorf("failed to marshal data for FReD: %w", err)
 	}
 
 	dataToStore := string(tokenBytes)

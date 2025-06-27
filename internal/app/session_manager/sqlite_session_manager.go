@@ -64,6 +64,7 @@ func (mgr *SQLiteSessionManager) initializeDB() {
 		created_at INTEGER,
 		last_active INTEGER,
 		expires_at INTEGER,
+		turn INTEGER NOT NULL DEFAULT 0,
 		FOREIGN KEY (user_id) REFERENCES users(user_id)
 	)`)
 	if err != nil {
@@ -313,24 +314,64 @@ func (mgr *SQLiteSessionManager) GetSessionMessages(sessionID string, limit int)
 	return messages, nil
 }
 
-// GetTextSessionContext returns formatted context for LLM inference using the specified format.
-func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMessages int) (string, error) {
+// GetTextSessionContext returns formatted context for LLM inference and the current session turn.
+func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMessages int) (string, int, error) {
 	startTime := time.Now()
 	defer func() {
 		log.Debugf("GetTextSessionContext for sessionID '%s' with maxMessages %d took %v", sessionID, maxMessages, time.Since(startTime))
 	}()
-	messages, err := mgr.GetSessionMessages(sessionID, maxMessages)
+	db, err := mgr.open()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	formatted := ""
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return "", 0, err
+	}
+	defer tx.Rollback() // Rollback if not committed
+
+	var turn int
+	err = tx.QueryRow("SELECT turn FROM sessions WHERE session_id = ?", sessionID).Scan(&turn)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", 0, fmt.Errorf("session %s not found", sessionID)
+		}
+		return "", 0, err
+	}
+
+	rows, err := tx.Query(
+		"SELECT role, content FROM messages WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?",
+		sessionID, maxMessages,
+	)
+	if err != nil {
+		return "", 0, err
+	}
+	defer rows.Close()
+
+	var messages []struct{ Role, Content string }
+	for rows.Next() {
+		var msg struct{ Role, Content string }
+		if err := rows.Scan(&msg.Role, &msg.Content); err != nil {
+			return "", 0, err
+		}
+		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return "", 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", 0, err
+	}
+
+	var formatted strings.Builder
 	for _, msg := range messages {
-		formatted += fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content)
+		formatted.WriteString(fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content))
 	}
-	// Add the final assistant start tag if needed by the model,
-	// otherwise, remove or comment out the next line.
-	//formatted += "<|im_start|>assistant\n"
-	return formatted, nil
+
+	return formatted.String(), turn, nil
 }
 
 func (mgr *SQLiteSessionManager) DeleteSession(sessionID string) error {
@@ -351,6 +392,31 @@ func (mgr *SQLiteSessionManager) DeleteSession(sessionID string) error {
 	}
 	_, err = db.Exec("DELETE FROM sessions WHERE session_id = ?", sessionID)
 	return err
+}
+
+func (mgr *SQLiteSessionManager) IncrementSessionTurn(sessionID string) error {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("IncrementSessionTurn for sessionID '%s' took %v", sessionID, time.Since(startTime))
+	}()
+	db, err := mgr.open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	result, err := db.Exec("UPDATE sessions SET turn = turn + 1 WHERE session_id = ?", sessionID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("session %s not found for turn increment", sessionID)
+	}
+	return nil
 }
 
 func (mgr *SQLiteSessionManager) CleanupExpiredSessions() (int, error) {
