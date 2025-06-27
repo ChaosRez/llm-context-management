@@ -8,12 +8,13 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	log "github.com/sirupsen/logrus"
-	SessionManager "llm-context-management/internal/app/session_manager"
-	Llama "llm-context-management/internal/pkg/llama_wrapper"
 )
 
-// TODO: *update the code to match FReD's simple implementation (no use of llama or session manager directly)
-const maxMessagesForUpdate = 10000 // TODO consider making maxMessages configurable or using a constant
+// RedisContextData is the structure stored as JSON in Redis.
+type RedisContextData struct {
+	Context []int `json:"context"`
+	Turn    int   `json:"turn"`
+}
 
 type RedisContextStorage struct {
 	client *redis.Client
@@ -28,7 +29,7 @@ func NewRedisContextStorage(addr, password string, db int) *RedisContextStorage 
 	return &RedisContextStorage{client: client}
 }
 
-func (r *RedisContextStorage) GetTokenizedSessionContext(sessionID string) ([]int, error) {
+func (r *RedisContextStorage) GetTokenizedSessionContext(sessionID string) ([]int, int, error) {
 	startTime := time.Now()
 	defer func() {
 		log.Debugf("Redis: GetTokenizedSessionContext for session %s took %s", sessionID, time.Since(startTime))
@@ -39,31 +40,35 @@ func (r *RedisContextStorage) GetTokenizedSessionContext(sessionID string) ([]in
 	log.Infof("Redis: Attempting to retrieve tokenized context for session ID: %s from cache key: %s", sessionID, cacheKey)
 
 	redisStartTime := time.Now()
-	cachedTokenJSON, err := r.client.Get(ctx, cacheKey).Result()
+	cachedJSON, err := r.client.Get(ctx, cacheKey).Result()
 	log.Debugf("Redis: GET for %s took %s", cacheKey, time.Since(redisStartTime))
 
-	if err == nil {
-		log.Infof("Redis: Cache hit for session ID: %s", sessionID)
-		unmarshalStartTime := time.Now()
-		var tokens []int
-		err = json.Unmarshal([]byte(cachedTokenJSON), &tokens)
-		log.Debugf("Redis: JSON unmarshal for session %s took %s", sessionID, time.Since(unmarshalStartTime))
-		if err != nil {
-			log.Errorf("Redis: Failed to unmarshal cached tokens for session ID %s: %v", sessionID, err)
-			return nil, fmt.Errorf("failed to unmarshal cached tokens: %w", err)
-		}
-		return tokens, nil
-	} else if err != redis.Nil {
+	if err == redis.Nil {
+		log.Warnf("Redis: Cache miss for session ID: %s.", sessionID)
+		return nil, 0, redis.Nil
+	} else if err != nil {
 		log.Errorf("Redis: Error checking Redis cache for session ID %s: %v", sessionID, err)
-		return nil, fmt.Errorf("failed to check cache: %w", err)
+		return nil, 0, fmt.Errorf("failed to check cache: %w", err)
 	}
 
-	log.Warnf("Redis: Cache miss for session ID: %s. Generating and caching tokenized context.", sessionID)
-	// Return redis.Nil to indicate not found, which will be checked by IsNotFoundError
-	return nil, redis.Nil
+	if cachedJSON == "" {
+		log.Warnf("Redis: Cache hit for session ID: %s, but data is empty. Returning empty context and turn 0.", sessionID)
+		return []int{}, 0, nil
+	}
+
+	log.Infof("Redis: Cache hit for session ID: %s", sessionID)
+	unmarshalStartTime := time.Now()
+	var data RedisContextData
+	err = json.Unmarshal([]byte(cachedJSON), &data)
+	log.Debugf("Redis: JSON unmarshal for session %s took %s", sessionID, time.Since(unmarshalStartTime))
+	if err != nil {
+		log.Errorf("Redis: Failed to unmarshal cached data for session ID %s: %v. Data: %s", sessionID, err, cachedJSON)
+		return nil, 0, fmt.Errorf("failed to unmarshal cached data from Redis: %w", err)
+	}
+	return data.Context, data.Turn, nil
 }
 
-func (r *RedisContextStorage) UpdateSessionContext(sessionID string, sessionManager *SessionManager.SQLiteSessionManager, llamaService *Llama.LlamaClient) error {
+func (r *RedisContextStorage) UpdateSessionContext(sessionID string, newFullTokenizedContext []int, newTurn int) error {
 	startTime := time.Now()
 	defer func() {
 		log.Infof("Redis: UpdateSessionContext for session %s took %s", sessionID, time.Since(startTime))
@@ -71,46 +76,28 @@ func (r *RedisContextStorage) UpdateSessionContext(sessionID string, sessionMana
 
 	ctx := context.Background()
 	cacheKey := "ctx_" + sessionID
-	log.Infof("Redis: Updating tokenized context cache for session ID: %s using cache key: %s", sessionID, cacheKey)
+	log.Infof("Redis: Updating tokenized context cache for session ID: %s to turn %d using cache key: %s", sessionID, newTurn, cacheKey)
 
-	getTextContextStartTime := time.Now()
-	rawTextContext, err := sessionManager.GetTextSessionContext(sessionID, maxMessagesForUpdate)
-	log.Debugf("Redis: GetTextSessionContext for session %s (update) took %s", sessionID, time.Since(getTextContextStartTime))
-	if err != nil {
-		log.Errorf("Redis: Failed to retrieve text context for session ID %s during update: %v", sessionID, err)
-		return err
+	if newFullTokenizedContext == nil {
+		log.Warnf("Redis: newFullTokenizedContext is nil for session ID %s. Caching empty token list.", sessionID)
+		newFullTokenizedContext = []int{}
 	}
 
-	var tokenBytes []byte
-	if rawTextContext == "" {
-		log.Warnf("Redis: No messages found for session ID %s during update. Caching empty token list.", sessionID)
-		marshalStartTime := time.Now()
-		tokenBytes, err = json.Marshal([]int{})
-		log.Debugf("Redis: JSON marshal for empty token list (session %s) took %s", sessionID, time.Since(marshalStartTime))
-		if err != nil {
-			log.Errorf("Redis: Failed to marshal empty token list for session ID %s during update: %v", sessionID, err)
-			return err
-		}
-	} else {
-		tokenizeStartTime := time.Now()
-		tokens, errTokenize := llamaService.Tokenize(rawTextContext)
-		log.Debugf("Redis: Tokenization for session %s (update) took %s", sessionID, time.Since(tokenizeStartTime))
-		if errTokenize != nil {
-			log.Errorf("Redis: Failed to tokenize context for session ID %s during update: %v", sessionID, errTokenize)
-			return errTokenize
-		}
+	data := RedisContextData{
+		Context: newFullTokenizedContext,
+		Turn:    newTurn,
+	}
 
-		marshalStartTime := time.Now()
-		tokenBytes, err = json.Marshal(tokens)
-		log.Debugf("Redis: JSON marshal for tokens (session %s) took %s", sessionID, time.Since(marshalStartTime))
-		if err != nil {
-			log.Errorf("Redis: Failed to marshal tokens for caching for session ID %s during update: %v", sessionID, err)
-			return err
-		}
+	marshalStartTime := time.Now()
+	dataBytes, err := json.Marshal(data)
+	log.Debugf("Redis: JSON marshal for new context data (session %s) took %s", sessionID, time.Since(marshalStartTime))
+	if err != nil {
+		log.Errorf("Redis: Failed to marshal data for caching for session ID %s: %v", sessionID, err)
+		return fmt.Errorf("failed to marshal data for Redis: %w", err)
 	}
 
 	redisSetStartTime := time.Now()
-	err = r.client.Set(ctx, cacheKey, string(tokenBytes), 0).Err()
+	err = r.client.Set(ctx, cacheKey, dataBytes, 0).Err()
 	log.Debugf("Redis: SET for %s took %s", cacheKey, time.Since(redisSetStartTime))
 	if err != nil {
 		log.Errorf("Redis: Failed to update tokenized context in Redis for session ID %s: %v", sessionID, err)
