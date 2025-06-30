@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,9 @@ import (
 	ContextStorage "llm-context-management/internal/pkg/context_storage"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -24,6 +28,8 @@ type Server struct {
 	contextStorage ContextStorage.ContextStorage
 	sessionLocks   map[string]*sync.Mutex
 	locksMutex     sync.RWMutex
+	csvWriter      *csv.Writer
+	csvFile        *os.File
 }
 
 // NewServer creates a new Server instance.
@@ -32,12 +38,34 @@ func NewServer(
 	sm *SessionManager.SQLiteSessionManager,
 	cs ContextStorage.ContextStorage,
 ) *Server {
-	return &Server{
+	s := &Server{
 		llamaService:   llama,
 		sessionManager: sm,
 		contextStorage: cs,
 		sessionLocks:   make(map[string]*sync.Mutex),
 	}
+
+	// Initialize CSV logger
+	logDir := "testdata/log/"
+	if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
+		log.Fatalf("Failed to create log directory %s: %v", logDir, err)
+	}
+	csvFilename := filepath.Join(logDir, fmt.Sprintf("%s_server.csv", time.Now().Format("20060102_150405")))
+	csvFile, err := os.Create(csvFilename)
+	if err != nil {
+		log.Fatalf("Failed to create server CSV log file %s: %v", csvFilename, err)
+	}
+	s.csvFile = csvFile // Store file to close it later
+
+	s.csvWriter = csv.NewWriter(csvFile)
+	headers := []string{"Timestamp", "Operation", "DurationMs", "ContextMethod", "ScenarioName", "SessionID", "RequestSizeBytes", "PromptChars", "ContextTokens", "Turn", "Details"}
+	if err := s.csvWriter.Write(headers); err != nil {
+		log.Fatalf("Failed to write CSV header to %s: %v", csvFilename, err)
+	}
+	s.csvWriter.Flush()
+	log.Infof("Logging server operations to %s", csvFilename)
+
+	return s
 }
 
 // CompletionRequest defines the expected structure of the incoming JSON request.
@@ -97,6 +125,31 @@ func (cr *CompletionRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// writeOperationToCsv writes a record to the server's CSV log.
+func (s *Server) writeOperationToCsv(opActualStartTime time.Time, operationName string, duration time.Duration, contextMethod string, scenarioName string, sessionID string, requestSize int, promptChars int, contextTokens int, turn int, details string) {
+	if s.csvWriter == nil {
+		log.Warnf("CSV writer not initialized when trying to log operation: %s", operationName)
+		return
+	}
+	record := []string{
+		opActualStartTime.Format("2006-01-02T15:04:05.000Z07:00"), // ISO8601 like timestamp for operation start
+		operationName,
+		strconv.FormatInt(duration.Milliseconds(), 10),
+		contextMethod,
+		scenarioName,
+		sessionID,
+		strconv.Itoa(requestSize),
+		strconv.Itoa(promptChars),
+		strconv.Itoa(contextTokens),
+		strconv.Itoa(turn),
+		details,
+	}
+	if err := s.csvWriter.Write(record); err != nil {
+		log.Errorf("Failed to write record to CSV for operation %s: %v", operationName, err)
+	}
+	s.csvWriter.Flush() // Flush after each write to ensure data is saved
+}
+
 // handleCompletion handles requests to the /completion endpoint.
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	handleStartTime := time.Now()
@@ -110,6 +163,10 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log the size of the incoming request body.
+	requestSize := r.ContentLength
+	log.Infof("Received request from %s with content length: %d bytes", r.RemoteAddr, requestSize)
+
 	var clientReq CompletionRequest
 	decodeStartTime := time.Now()
 	if err := json.NewDecoder(r.Body).Decode(&clientReq); err != nil {
@@ -119,6 +176,22 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Debugf("Request body decoding took %s", time.Since(decodeStartTime))
 	defer r.Body.Close()
+
+	// Log network overhead to CSV
+	// We log this early, some fields like SessionID might be empty if not provided.
+	s.writeOperationToCsv(
+		handleStartTime,
+		"Network.Request.Size",
+		-1, // Duration is not applicable here
+		clientReq.Mode,
+		"ServerMode",
+		clientReq.SessionID,
+		int(requestSize),
+		len(clientReq.Prompt),
+		-1, // Context tokens are not known yet
+		clientReq.Turn,
+		"", // Details are now in separate columns
+	)
 
 	// Set X-Session-ID header for deferred log once clientReq.SessionID is determined
 	// This is a bit of a workaround as SessionID isn't known at the very start of the defer.
@@ -140,13 +213,15 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Infof("No session_id provided, creating a new session for user '%s'.", effectiveUserID)
 		createSessStartTime := time.Now()
 		sessionID, err := s.sessionManager.CreateSession(effectiveUserID, sessionDurationDays)
-		log.Debugf("s.sessionManager.CreateSession for user '%s' took %s", effectiveUserID, time.Since(createSessStartTime))
+		createSessDuration := time.Since(createSessStartTime)
+		log.Debugf("s.sessionManager.CreateSession for user '%s' took %s", effectiveUserID, createSessDuration)
 		if err != nil {
 			log.Errorf("Failed to create session for user '%s': %v", effectiveUserID, err)
 			http.Error(w, "Failed to create session", http.StatusInternalServerError)
 			return
 		}
 		clientReq.SessionID = sessionID
+		s.writeOperationToCsv(createSessStartTime, "sessionManager.CreateSession", createSessDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, -1, -1, fmt.Sprintf("UserID: %s", effectiveUserID))
 		r.Header.Set("X-Session-ID", clientReq.SessionID) // Update for defer log
 		log.Infof("Created new session ID: %s for user %s", clientReq.SessionID, effectiveUserID)
 	} else {
@@ -208,7 +283,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
 		getTextCtxStartTime := time.Now()
 		textContext, currentTurn, errCtx := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
-		log.Debugf("s.sessionManager.GetTextSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTextCtxStartTime))
+		getTextCtxDuration := time.Since(getTextCtxStartTime)
+		log.Debugf("s.sessionManager.GetTextSessionContext for session %s took %s", clientReq.SessionID, getTextCtxDuration)
+		s.writeOperationToCsv(getTextCtxStartTime, "sessionManager.GetTextSessionContext", getTextCtxDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, -1, currentTurn, fmt.Sprintf("HistoryLength: %d", rawHistoryLength))
 		if errCtx != nil {
 			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, errCtx)
 			http.Error(w, "Failed to retrieve session context", http.StatusInternalServerError)
@@ -237,7 +314,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		var errCtx error
 		var currentTurn int
 		tokenizedContext, currentTurn, errCtx = s.contextStorage.GetTokenizedSessionContext(clientReq.SessionID)
-		log.Debugf("s.contextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, time.Since(getTokenCtxStartTime))
+		getTokenCtxDuration := time.Since(getTokenCtxStartTime)
+		log.Debugf("s.contextStorage.GetTokenizedSessionContext for session %s took %s", clientReq.SessionID, getTokenCtxDuration)
 
 		if errCtx != nil {
 			if !s.contextStorage.IsNotFoundError(errCtx) {
@@ -254,6 +332,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			tokenizedContext = []int{} // Initialize to empty if nil
 			currentTurn = 0            // For a new session, turn is 0
 		}
+		s.writeOperationToCsv(getTokenCtxStartTime, "contextStorage.GetTokenizedSessionContext", getTokenCtxDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, len(tokenizedContext), currentTurn, "")
 
 		// Turn validation
 		if clientReq.Turn != currentTurn+1 {
@@ -264,7 +343,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		finalPrompt = clientReq.Prompt
+		finalPrompt = clientReq.Prompt // the template is added by LLama.cpp internally
 		llamaReq["prompt"] = finalPrompt
 		// Add the retrieved tokenized context if available
 		if len(tokenizedContext) > 0 {
@@ -281,7 +360,9 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	log.Infof("Sending completion request to Llama service for session %s", clientReq.SessionID)
 	llamaCallStartTime := time.Now()
 	resp, err := s.llamaService.Completion(llamaReq) // llamaService.Completion has internal timing
-	log.Debugf("s.llamaService.Completion call for session %s took %s (overall)", clientReq.SessionID, time.Since(llamaCallStartTime))
+	llamaCallDuration := time.Since(llamaCallStartTime)
+	log.Debugf("s.llamaService.Completion call for session %s took %s (overall)", clientReq.SessionID, llamaCallDuration)
+	s.writeOperationToCsv(llamaCallStartTime, "llamaService.Completion", llamaCallDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, len(finalPrompt), len(tokenizedContext), clientReq.Turn, "")
 	if err != nil {
 		log.Errorf("Llama completion error for session %s: %v", clientReq.SessionID, err)
 		http.Error(w, "Error processing completion request", http.StatusInternalServerError)
@@ -351,7 +432,9 @@ func (s *Server) updateHistoryAndContextAsync(
 		if _, err := s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model); err != nil {
 			log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
 		} else {
-			log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, time.Since(addUserMsgStartTime))
+			addUserMsgDuration := time.Since(addUserMsgStartTime)
+			log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, addUserMsgDuration)
+			s.writeOperationToCsv(addUserMsgStartTime, "sessionManager.AddMessage", addUserMsgDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, len(clientReq.Prompt), -1, clientReq.Turn, "Role: user")
 		}
 
 		// --- Add assistant response to session history ---
@@ -360,14 +443,19 @@ func (s *Server) updateHistoryAndContextAsync(
 			if _, err := s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model); err != nil {
 				log.Errorf("Failed to add assistant message for session %s: %v", clientReq.SessionID, err)
 			} else {
-				log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, time.Since(addAssistantMsgStartTime))
+				addAssistantMsgDuration := time.Since(addAssistantMsgStartTime)
+				log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, addAssistantMsgDuration)
+				s.writeOperationToCsv(addAssistantMsgStartTime, "sessionManager.AddMessage", addAssistantMsgDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, len(assistantMsg), -1, clientReq.Turn, "Role: assistant")
 			}
 		}
 		// --- Increment turn ---
+		incrementTurnStartTime := time.Now()
 		if err := s.sessionManager.IncrementSessionTurn(clientReq.SessionID); err != nil {
 			log.Errorf("Failed to increment turn for session %s: %v", clientReq.SessionID, err)
 		} else {
+			incrementTurnDuration := time.Since(incrementTurnStartTime)
 			log.Infof("Incremented turn for session %s to %d", clientReq.SessionID, clientReq.Turn)
+			s.writeOperationToCsv(incrementTurnStartTime, "sessionManager.IncrementSessionTurn", incrementTurnDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, -1, clientReq.Turn-1, "")
 		}
 	} else if clientReq.Mode == "tokenized" {
 		if assistantMsg == "" {
@@ -379,7 +467,9 @@ func (s *Server) updateHistoryAndContextAsync(
 
 		tokenizeNewOpStartTime := time.Now()
 		newInteractionTokens, errTokenize := s.llamaService.Tokenize(newUserInteractionText)
-		log.Debugf("s.llamaService.Tokenize (new interaction) for session %s took %s", clientReq.SessionID, time.Since(tokenizeNewOpStartTime))
+		tokenizeNewOpDuration := time.Since(tokenizeNewOpStartTime)
+		log.Debugf("s.llamaService.Tokenize (new interaction) for session %s took %s", clientReq.SessionID, tokenizeNewOpDuration)
+		s.writeOperationToCsv(tokenizeNewOpStartTime, "llamaService.Tokenize", tokenizeNewOpDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, len(newUserInteractionText), -1, clientReq.Turn, "New interaction")
 
 		if errTokenize != nil {
 			log.Errorf("Failed to tokenize new interaction for session %s: %v", clientReq.SessionID, errTokenize)
@@ -393,7 +483,9 @@ func (s *Server) updateHistoryAndContextAsync(
 
 		updateCtxOpStartTime := time.Now()
 		errUpdateCtx := s.contextStorage.UpdateSessionContext(clientReq.SessionID, updatedFullTokenizedContext, clientReq.Turn)
-		log.Debugf("s.contextStorage.UpdateSessionContext for session %s took %s", clientReq.SessionID, time.Since(updateCtxOpStartTime))
+		updateCtxOpDuration := time.Since(updateCtxOpStartTime)
+		log.Debugf("s.contextStorage.UpdateSessionContext for session %s took %s", clientReq.SessionID, updateCtxOpDuration)
+		s.writeOperationToCsv(updateCtxOpStartTime, "contextStorage.UpdateSessionContext", updateCtxOpDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, len(updatedFullTokenizedContext), clientReq.Turn, "")
 
 		if errUpdateCtx != nil {
 			log.Errorf("Failed to update tokenized session context for session %s: %v", clientReq.SessionID, errUpdateCtx)
@@ -409,5 +501,16 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/completion", s.handleCompletion)
 	// TODO: Add handlers for session management (list, delete)
 	log.Infof("Starting server on %s", addr)
+
+	// Defer closing the CSV file and flushing the writer
+	defer func() {
+		if s.csvWriter != nil {
+			s.csvWriter.Flush()
+		}
+		if s.csvFile != nil {
+			s.csvFile.Close()
+		}
+	}()
+
 	return http.ListenAndServe(addr, mux)
 }

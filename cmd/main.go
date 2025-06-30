@@ -21,7 +21,7 @@ import (
 // TODO fix the Payload keys for server
 
 // Helper function to write operation timing to CSV
-func writeOperationToCsv(writer *csv.Writer, opActualStartTime time.Time, operationName string, duration time.Duration, contextMethod string, scenarioName string, sessionID string, details string) {
+func writeOperationToCsv(writer *csv.Writer, opActualStartTime time.Time, operationName string, duration time.Duration, contextMethod string, scenarioName string, sessionID string, requestSize int, promptChars int, contextTokens int, turn int, details string) {
 	if writer == nil {
 		log.Warnf("CSV writer not initialized when trying to log operation: %s", operationName)
 		return
@@ -33,6 +33,10 @@ func writeOperationToCsv(writer *csv.Writer, opActualStartTime time.Time, operat
 		contextMethod,
 		scenarioName,
 		sessionID,
+		strconv.Itoa(requestSize),
+		strconv.Itoa(promptChars),
+		strconv.Itoa(contextTokens),
+		strconv.Itoa(turn),
 		details,
 	}
 	if err := writer.Write(record); err != nil {
@@ -42,7 +46,7 @@ func writeOperationToCsv(writer *csv.Writer, opActualStartTime time.Time, operat
 
 func main() {
 	// --- Configuration ---
-	const runServerMode = true // false to run the interactive scenario mode (file).
+	const runServerMode = true // false to run the scenario mode (file).
 	const dbPath = "sessions.db"
 	const sessionDurationDays = 1
 	const llamaURL = "http://localhost:8080"
@@ -141,15 +145,15 @@ func main() {
 		csvWriter = csv.NewWriter(csvFile)
 		defer csvWriter.Flush()
 
-		headers := []string{"Timestamp", "Operation", "DurationMs", "ContextMethod", "ScenarioName", "SessionID", "Details"}
+		headers := []string{"Timestamp", "Operation", "DurationMs", "ContextMethod", "ScenarioName", "SessionID", "RequestSizeBytes", "PromptChars", "ContextTokens", "Turn", "Details"}
 		if err := csvWriter.Write(headers); err != nil {
 			log.Fatalf("Failed to write CSV header to %s: %v", csvFilename, err)
 		}
 		log.Infof("Logging operations to %s", csvFilename)
 
 		// Write the previously captured timings
-		writeOperationToCsv(csvWriter, loadScenOpStartTime, "Scenario.LoadScenario", loadScenDuration, contextMethod, scen.Name, "", fmt.Sprintf("File: %s", filepath.Base(scenarioFilePath)))
-		writeOperationToCsv(csvWriter, createSessOpStartTime, "sessionManager.CreateSession", createSessDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("UserID: %s, DurationDays: %d", scen.UserID, sessionDurationDays))
+		writeOperationToCsv(csvWriter, loadScenOpStartTime, "Scenario.LoadScenario", loadScenDuration, contextMethod, scen.Name, "", -1, -1, -1, -1, fmt.Sprintf("File: %s", filepath.Base(scenarioFilePath)))
+		writeOperationToCsv(csvWriter, createSessOpStartTime, "sessionManager.CreateSession", createSessDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, -1, fmt.Sprintf("UserID: %s, DurationDays: %d", scen.UserID, sessionDurationDays))
 
 		scenarioProcessingStartTime := time.Now() // Start timing after context method selection
 
@@ -173,7 +177,7 @@ func main() {
 				textContext, dbTurn, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength) // textContext is local
 				opDuration = time.Since(opStartTime)
 				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.GetTextSessionContext (raw)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, HistoryLength: %d", i, rawHistoryLength))
+				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.GetTextSessionContext (raw)", opDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, currentTurn, fmt.Sprintf("MessageIndex: %d, HistoryLength: %d", i, rawHistoryLength))
 				if errCtx != nil {
 					log.Fatalf("Failed to get raw session context: %v", errCtx)
 				}
@@ -197,7 +201,7 @@ func main() {
 					fetchedTokens, fredTurn, errCtx = fredContextStorage.GetTokenizedSessionContext(sessionID)
 					opDuration = time.Since(opStartTime)
 					log.Infof("fredContextStorage.GetTokenizedSessionContext (initial) took %v", opDuration)
-					writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetTokenizedSessionContext (initial)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d", i))
+					writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetTokenizedSessionContext (initial)", opDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, currentTurn, fmt.Sprintf("MessageIndex: %d", i))
 					if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
 						log.Warnf("Failed to get tokenized session context (proceeding without): %v", errCtx)
 						currentTokenizedContext = []int{} // Initialize to empty if error but not NotFound
@@ -233,7 +237,7 @@ func main() {
 			resp, errCompletion := llamaService.Completion(req)
 			opDuration = time.Since(opStartTime)
 			log.Infof("llamaService.Completion took %v", opDuration)
-			writeOperationToCsv(csvWriter, opStartTime, "llamaService.Completion", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, PromptChars: %d", i, len(prompt)))
+			writeOperationToCsv(csvWriter, opStartTime, "llamaService.Completion", opDuration, contextMethod, scen.Name, sessionID, -1, len(prompt), len(currentTokenizedContext), currentTurn+1, fmt.Sprintf("MessageIndex: %d", i))
 			if errCompletion != nil {
 				log.Fatalf("Completion error: %v", errCompletion)
 			}
@@ -243,7 +247,7 @@ func main() {
 				_, errAddMsg := sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
 				opDuration = time.Since(opStartTime)
 				log.Infof("sessionManager.AddMessage (user) took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (user)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: user, MessageChars: %d", i, len(message)))
+				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (user)", opDuration, contextMethod, scen.Name, sessionID, -1, len(message), -1, currentTurn+1, fmt.Sprintf("MessageIndex: %d, Role: user", i))
 				if errAddMsg != nil {
 					log.Errorf("Failed to add user message: %v", errAddMsg)
 				}
@@ -258,7 +262,7 @@ func main() {
 					_, errAddMsg := sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
 					opDuration = time.Since(opStartTime)
 					log.Infof("sessionManager.AddMessage (assistant) took %v", opDuration)
-					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (assistant)", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Role: assistant, MessageChars: %d", i, len(assistantMsg)))
+					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (assistant)", opDuration, contextMethod, scen.Name, sessionID, -1, len(assistantMsg), -1, currentTurn+1, fmt.Sprintf("MessageIndex: %d, Role: assistant", i))
 					if errAddMsg != nil {
 						log.Errorf("Failed to add assistant message: %v", errAddMsg)
 					}
@@ -267,7 +271,7 @@ func main() {
 					errIncrement := sessionManager.IncrementSessionTurn(sessionID)
 					opDuration = time.Since(opStartTime)
 					log.Infof("sessionManager.IncrementSessionTurn took %v", opDuration)
-					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.IncrementSessionTurn", opDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, NewTurn: %d", i, currentTurn+1))
+					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.IncrementSessionTurn", opDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, currentTurn, fmt.Sprintf("MessageIndex: %d, NewTurn: %d", i, currentTurn+1))
 					if errIncrement != nil {
 						log.Fatalf("Failed to increment turn: %v", errIncrement)
 					}
@@ -285,7 +289,7 @@ func main() {
 					newInteractionTokens, errTokenize := llamaService.Tokenize(newUserInteractionText)
 					tokenizeNewOpDuration := time.Since(tokenizeNewOpStartTime)
 					log.Infof("llamaService.Tokenize (new interaction) took %v", tokenizeNewOpDuration)
-					writeOperationToCsv(csvWriter, tokenizeNewOpStartTime, "llamaService.Tokenize (new interaction)", tokenizeNewOpDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, Chars: %d", i, len(newUserInteractionText)))
+					writeOperationToCsv(csvWriter, tokenizeNewOpStartTime, "llamaService.Tokenize (new interaction)", tokenizeNewOpDuration, contextMethod, scen.Name, sessionID, -1, len(newUserInteractionText), -1, currentTurn+1, fmt.Sprintf("MessageIndex: %d", i))
 
 					if errTokenize != nil {
 						log.Errorf("Failed to tokenize new interaction for session %s: %v", sessionID, errTokenize)
@@ -302,7 +306,7 @@ func main() {
 						errUpdateCtx := fredContextStorage.UpdateSessionContext(sessionID, updatedFullTokenizedContext, currentTurn+1)
 						updateCtxOpDuration := time.Since(updateCtxOpStartTime)
 						log.Infof("fredContextStorage.UpdateSessionContext took %v", updateCtxOpDuration)
-						writeOperationToCsv(csvWriter, updateCtxOpStartTime, "fredContextStorage.UpdateSessionContext", updateCtxOpDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageIndex: %d, TotalTokens: %d, NewTurn: %d", i, len(updatedFullTokenizedContext), currentTurn+1))
+						writeOperationToCsv(csvWriter, updateCtxOpStartTime, "fredContextStorage.UpdateSessionContext", updateCtxOpDuration, contextMethod, scen.Name, sessionID, -1, -1, len(updatedFullTokenizedContext), currentTurn+1, fmt.Sprintf("MessageIndex: %d", i))
 
 						if errUpdateCtx != nil {
 							log.Fatalf("Failed to update tokenized session context: %v", errUpdateCtx)
@@ -320,7 +324,7 @@ func main() {
 
 		totalScenarioProcessingDuration := time.Since(scenarioProcessingStartTime)
 		log.Infof("Total processing time for scenario '%s' using '%s' context method: %v", scen.Name, contextMethod, totalScenarioProcessingDuration)
-		writeOperationToCsv(csvWriter, scenarioProcessingStartTime, "TotalScenarioProcessing", totalScenarioProcessingDuration, contextMethod, scen.Name, sessionID, fmt.Sprintf("MessageCount: %d", len(scen.Messages)))
+		writeOperationToCsv(csvWriter, scenarioProcessingStartTime, "TotalScenarioProcessing", totalScenarioProcessingDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, -1, fmt.Sprintf("MessageCount: %d", len(scen.Messages)))
 
 		// Prompt for session deletion (optional)
 		if sessionID != "" {
@@ -351,7 +355,7 @@ func main() {
 }
 
 func init() {
-	ll, err := log.ParseLevel("debug")
+	ll, err := log.ParseLevel("info") // TODO: load from config
 	if err != nil {
 		ll = log.InfoLevel
 	}
