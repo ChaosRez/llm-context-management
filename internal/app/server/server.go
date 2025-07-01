@@ -72,7 +72,7 @@ func NewServer(
 
 // CompletionRequest defines the expected structure of the incoming JSON request.
 type CompletionRequest struct {
-	Mode        string                 `json:"mode"` // "raw" or "tokenized"
+	Mode        string                 `json:"mode"` // "raw", "tokenized", or "client-side"
 	SessionID   string                 `json:"session_id,omitempty"`
 	UserID      string                 `json:"user_id,omitempty"` // UserID field
 	Turn        int                    `json:"turn"`              // Client-side turn counter, must be >= 1
@@ -370,9 +370,17 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			llamaReq["context"] = tokenizedContext // This key is added internally, not accepted from client
 			log.Debugf("Added tokenized context to Llama request for session %s", clientReq.SessionID)
 		}
+	} else if clientReq.Mode == "client-side" {
+		log.Infof("Using 'client-side' mode for session %s, forwarding request.", clientReq.SessionID)
+		finalPrompt = clientReq.Prompt
+		llamaReq["prompt"] = finalPrompt
+		// No context management, just forward.
+		// The lock will be released immediately after the call.
 	} else {
 		log.Warnf("Invalid mode '%s' requested for session %s", clientReq.Mode, clientReq.SessionID)
-		http.Error(w, fmt.Sprintf("Invalid mode: %s. Use 'raw' or 'tokenized'", clientReq.Mode), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("Invalid mode: %s. Use 'raw', 'tokenized', or 'client-side'", clientReq.Mode), http.StatusBadRequest)
+		sessionLock.Unlock()
+		log.Infof("Lock released for session %s due to invalid mode", clientReq.SessionID)
 		return
 	}
 
@@ -408,7 +416,12 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	// --- Asynchronously update history and context ---
 	// This is done in a goroutine to avoid making the client wait.
 	// The lock for the session is passed to the goroutine and released there.
-	go s.updateHistoryAndContextAsync(clientReq, assistantMsg, tokenizedContext, sessionLock)
+	if clientReq.Mode == "client-side" {
+		sessionLock.Unlock()
+		log.Infof("Lock released for session %s (client-side mode)", clientReq.SessionID)
+	} else {
+		go s.updateHistoryAndContextAsync(clientReq, assistantMsg, tokenizedContext, sessionLock)
+	}
 
 	// --- Add session_id, user_id, and mode to the response ---
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
@@ -447,6 +460,11 @@ func (s *Server) updateHistoryAndContextAsync(
 		sessionLock.Unlock()
 		log.Infof("Lock released for session %s", clientReq.SessionID)
 	}()
+
+	if clientReq.Mode == "client-side" {
+		// No history/context update needed for client-side mode.
+		return
+	}
 
 	log.Infof("Starting async history/context update for session %s", clientReq.SessionID)
 
