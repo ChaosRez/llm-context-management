@@ -427,6 +427,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	resp["session_id"] = clientReq.SessionID // Add session_id (original or generated)
 	resp["user_id"] = effectiveUserID        // Add the effective user_id used/provided
 	resp["mode"] = clientReq.Mode            // Add the mode used for the request
+	resp["request_size"] = requestSize
 	if clientReq.Retries > 0 {
 		resp["retries"] = clientReq.Retries
 		log.Infof("Completion for session %s required %d retries for turn consistency.", clientReq.SessionID, clientReq.Retries)
