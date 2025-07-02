@@ -21,7 +21,7 @@ const rawHistoryLength = 20
 const sessionDurationDays = 1
 const defaultUserID = "default_user" // Default user ID if none provided
 const maxTurnRetries = 5
-const turnRetryDelay = 20 * time.Millisecond
+const turnRetryDelay = 10 * time.Millisecond
 
 // Server holds dependencies for the HTTP server.
 type Server struct {
