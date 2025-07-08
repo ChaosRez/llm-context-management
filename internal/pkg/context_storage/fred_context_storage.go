@@ -28,10 +28,16 @@ const (
 // ErrFredNotFound is returned when a key is not found in FReD.
 var ErrFredNotFound = fmt.Errorf("key not found in FReD")
 
-// FredContextData is the structure stored as JSON in FReD.
+// FredContextData is the structure stored as JSON in FReD for tokenized context.
 type FredContextData struct {
 	Context []int `json:"context"`
 	Turn    int   `json:"turn"`
+}
+
+// RawFredContextData is the structure stored as JSON in FReD for raw context.
+type RawFredContextData struct {
+	Messages []RawMessage `json:"messages"`
+	Turn     int          `json:"turn"`
 }
 
 // FReDContextStorage implements the ContextStorage interface using FReD.
@@ -333,6 +339,61 @@ func (f *FReDContextStorage) GetTokenizedSessionContext(sessionID string) ([]int
 	return data.Context, data.Turn, nil
 }
 
+// GetRawSessionContext retrieves the raw session context (message history) and turn from FReD.
+func (f *FReDContextStorage) GetRawSessionContext(sessionID string) ([]RawMessage, int, error) {
+	startTime := time.Now()
+	defer func() {
+		log.Debugf("FReD: GetRawSessionContext for session %s took %s", sessionID, time.Since(startTime))
+	}()
+
+	log.Infof("FReD: Attempting to retrieve raw context for session ID: %s from keygroup: %s", sessionID, f.keygroup)
+
+	readReq := &fredClient.ReadRequest{
+		Keygroup: f.keygroup,
+		Id:       sessionID,
+	}
+
+	fredReadStartTime := time.Now()
+	readResp, err := f.client.Read(context.Background(), readReq)
+	log.Debugf("FReD: Read for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredReadStartTime))
+
+	if err != nil {
+		s, ok := status.FromError(err)
+		if ok && s.Code() == codes.NotFound {
+			log.Warnf("FReD: Cache miss (NotFound) for raw session ID: %s in keygroup: %s.", sessionID, f.keygroup)
+			return nil, 0, ErrFredNotFound
+		}
+		log.Errorf("FReD: Failed to read from keygroup '%s', id '%s': %v", f.keygroup, sessionID, err)
+		return nil, 0, fmt.Errorf("failed to read from FReD: %w", err)
+	}
+
+	if readResp == nil || len(readResp.Data) == 0 {
+		log.Warnf("FReD: Cache miss for raw session ID: '%s' in keygroup: '%s'. No data items returned.", sessionID, f.keygroup)
+		return nil, 0, ErrFredNotFound
+	}
+
+	if len(readResp.Data) > 1 {
+		log.Warnf("FReD: Expected 1 item for session ID '%s', but got %d. Using the first one.", sessionID, len(readResp.Data))
+	}
+
+	jsonData := readResp.Data[0].Val
+	if jsonData == "" {
+		log.Warnf("FReD: Cache hit for raw session ID: %s, but data is empty. Returning empty context and turn 0.", sessionID)
+		return []RawMessage{}, 0, nil
+	}
+
+	log.Infof("FReD: Cache hit for raw session ID: %s in keygroup: %s", sessionID, f.keygroup)
+	unmarshalStartTime := time.Now()
+	var data RawFredContextData
+	errUnmarshal := json.Unmarshal([]byte(jsonData), &data)
+	log.Debugf("FReD: JSON unmarshal for raw session %s took %s", sessionID, time.Since(unmarshalStartTime))
+	if errUnmarshal != nil {
+		log.Errorf("FReD: Failed to unmarshal cached raw data for session ID %s: %v. Data: %s", sessionID, errUnmarshal, jsonData)
+		return nil, 0, fmt.Errorf("failed to unmarshal cached raw data from FReD: %w", errUnmarshal)
+	}
+	return data.Messages, data.Turn, nil
+}
+
 // UpdateSessionContext stores the provided tokenized context and new turn in FReD.
 func (f *FReDContextStorage) UpdateSessionContext(sessionID string, newFullTokenizedContext []int, newTurn int) error {
 	startTime := time.Now()
@@ -381,6 +442,54 @@ func (f *FReDContextStorage) UpdateSessionContext(sessionID string, newFullToken
 	}
 
 	log.Infof("FReD: Tokenized context cache successfully updated for session ID: %s", sessionID)
+	return nil
+}
+
+// UpdateRawSessionContext stores the provided raw message history and new turn in FReD.
+func (f *FReDContextStorage) UpdateRawSessionContext(sessionID string, newMessages []RawMessage, newTurn int) error {
+	startTime := time.Now()
+	defer func() {
+		log.Infof("FReD: UpdateRawSessionContext for session %s took %s", sessionID, time.Since(startTime))
+	}()
+
+	log.Infof("FReD: Updating raw context cache for session ID: %s in keygroup: %s to turn %d", sessionID, f.keygroup, newTurn)
+
+	if newMessages == nil {
+		log.Warnf("FReD: newMessages is nil for session ID %s. Caching empty message list.", sessionID)
+		newMessages = []RawMessage{}
+	}
+
+	data := RawFredContextData{
+		Messages: newMessages,
+		Turn:     newTurn,
+	}
+
+	marshalStartTime := time.Now()
+	rawBytes, err := json.Marshal(data)
+	log.Debugf("FReD: JSON marshal for new raw context data (session %s) took %s", sessionID, time.Since(marshalStartTime))
+	if err != nil {
+		log.Errorf("FReD: Failed to marshal raw data for FReD caching for session ID %s: %v", sessionID, err)
+		return fmt.Errorf("failed to marshal raw data for FReD: %w", err)
+	}
+
+	dataToStore := string(rawBytes)
+	log.Debugf("FReD: Storing raw data for session %s: %s", sessionID, dataToStore)
+
+	updateReq := &fredClient.UpdateRequest{
+		Keygroup: f.keygroup,
+		Id:       sessionID,
+		Data:     dataToStore,
+	}
+
+	fredUpdateOpStartTime := time.Now()
+	_, err = f.client.Update(context.Background(), updateReq)
+	log.Debugf("FReD: Update operation for key %s in keygroup %s took %s", sessionID, f.keygroup, time.Since(fredUpdateOpStartTime))
+	if err != nil {
+		log.Errorf("FReD: Failed to update key %s in keygroup %s: %v", sessionID, f.keygroup, err)
+		return fmt.Errorf("failed to update FReD: %w", err)
+	}
+
+	log.Infof("FReD: Raw context cache successfully updated for session ID: %s", sessionID)
 	return nil
 }
 

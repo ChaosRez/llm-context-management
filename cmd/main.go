@@ -75,6 +75,7 @@ func main() {
 		// --- Server Mode ---
 		log.Info("Starting in Server Mode...")
 		srv := Server.NewServer(llamaService, sessionManager, fredContextStorage) // redisContextStorage
+		defer srv.Stop()                                                          // Ensure cleanup on exit
 		log.Fatal(srv.Start(serverListenAddr))
 
 	} else {
@@ -105,8 +106,6 @@ func main() {
 		createSessDuration := time.Since(createSessOpStartTime)
 		log.Infof("sessionManager.CreateSession took %v", createSessDuration)
 		log.Infof("Created session ID: %s", sessionID)
-
-		modelName := scen.ModelName // Capture model name for session messages
 
 		// Interactive loop (from yaml)
 		reader := bufio.NewReader(os.Stdin)
@@ -159,6 +158,7 @@ func main() {
 
 		// Scenario loop (from yaml)
 		var currentTokenizedContext []int // Declare here to persist across iterations for tokenized mode
+		var currentRawMessages []ContextStorage.RawMessage
 		var currentTurn int = 0
 
 		for i, message := range scen.Messages {
@@ -166,25 +166,37 @@ func main() {
 
 			var req map[string]interface{}
 			var prompt string
-			var textContext string // Only used in raw mode
 			var errCtx error
 			var opStartTime time.Time
 			var opDuration time.Duration
 
 			if contextMethod == "raw" {
 				opStartTime = time.Now()
-				var dbTurn int
-				textContext, dbTurn, errCtx = sessionManager.GetTextSessionContext(sessionID, rawHistoryLength) // textContext is local
+				var fetchedMessages []ContextStorage.RawMessage
+				var fredTurn int
+				fetchedMessages, fredTurn, errCtx = fredContextStorage.GetRawSessionContext(sessionID)
 				opDuration = time.Since(opStartTime)
-				log.Debugf("sessionManager.GetTextSessionContext (raw) took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.GetTextSessionContext (raw)", opDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, currentTurn, fmt.Sprintf("MessageIndex: %d, HistoryLength: %d", i, rawHistoryLength))
-				if errCtx != nil {
+				log.Debugf("fredContextStorage.GetRawSessionContext took %v", opDuration)
+				writeOperationToCsv(csvWriter, opStartTime, "fredContextStorage.GetRawSessionContext", opDuration, contextMethod, scen.Name, sessionID, -1, -1, -1, currentTurn, fmt.Sprintf("MessageIndex: %d", i))
+
+				if errCtx != nil && !fredContextStorage.IsNotFoundError(errCtx) {
 					log.Fatalf("Failed to get raw session context: %v", errCtx)
+				} else if errCtx == nil && fetchedMessages != nil {
+					currentRawMessages = fetchedMessages
+					currentTurn = fredTurn
+					log.Debugf("Retrieved raw context for session %s, messages: %d, turn: %d", sessionID, len(currentRawMessages), currentTurn)
+				} else {
+					currentRawMessages = []ContextStorage.RawMessage{}
+					currentTurn = 0
+					log.Infof("No existing raw context found for session %s, starting fresh.", sessionID)
 				}
-				if dbTurn != currentTurn {
-					log.Fatalf("Turn mismatch in raw mode! Expected turn %d from DB, but got %d", currentTurn, dbTurn)
+
+				var textContextBuilder strings.Builder
+				for _, msg := range currentRawMessages {
+					textContextBuilder.WriteString(fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content))
 				}
-				prompt = textContext + "<|im_start|>user\n" + message + "<|im_end|>\n"
+				prompt = textContextBuilder.String() + "<|im_start|>user\n" + message + "<|im_end|>\n"
+
 				req = map[string]interface{}{
 					"model":       scen.ModelName,
 					"prompt":      prompt,
@@ -242,31 +254,31 @@ func main() {
 				log.Fatalf("Completion error: %v", errCompletion)
 			}
 
-			if contextMethod == "raw" {
-				opStartTime = time.Now()
-				_, errAddMsg := sessionManager.AddMessage(sessionID, "user", message, nil, &modelName)
-				opDuration = time.Since(opStartTime)
-				log.Infof("sessionManager.AddMessage (user) took %v", opDuration)
-				writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (user)", opDuration, contextMethod, scen.Name, sessionID, -1, len(message), -1, currentTurn+1, fmt.Sprintf("MessageIndex: %d, Role: user", i))
-				if errAddMsg != nil {
-					log.Errorf("Failed to add user message: %v", errAddMsg)
-				}
-			}
-
 			// Process and add assistant response to session
 			if resp != nil && resp["content"] != nil {
 				assistantMsg := fmt.Sprintf("%v", resp["content"])
 				fmt.Printf("Response: \n%s\n", assistantMsg)
 				if contextMethod == "raw" {
-					opStartTime = time.Now()
-					_, errAddMsg := sessionManager.AddMessage(sessionID, "assistant", assistantMsg, nil, &modelName)
-					opDuration = time.Since(opStartTime)
-					log.Infof("sessionManager.AddMessage (assistant) took %v", opDuration)
-					writeOperationToCsv(csvWriter, opStartTime, "sessionManager.AddMessage (assistant)", opDuration, contextMethod, scen.Name, sessionID, -1, len(assistantMsg), -1, currentTurn+1, fmt.Sprintf("MessageIndex: %d, Role: assistant", i))
-					if errAddMsg != nil {
-						log.Errorf("Failed to add assistant message: %v", errAddMsg)
+					// --- Construct new message history ---
+					newHistory := append(currentRawMessages, ContextStorage.RawMessage{Role: "user", Content: message})
+					if assistantMsg != "" {
+						newHistory = append(newHistory, ContextStorage.RawMessage{Role: "assistant", Content: assistantMsg})
 					}
 
+					// --- Update raw context in FReD ---
+					updateCtxOpStartTime := time.Now()
+					errUpdateCtx := fredContextStorage.UpdateRawSessionContext(sessionID, newHistory, currentTurn+1)
+					updateCtxOpDuration := time.Since(updateCtxOpStartTime)
+					log.Infof("fredContextStorage.UpdateRawSessionContext took %v", updateCtxOpDuration)
+					writeOperationToCsv(csvWriter, updateCtxOpStartTime, "fredContextStorage.UpdateRawSessionContext", updateCtxOpDuration, contextMethod, scen.Name, sessionID, -1, -1, len(newHistory), currentTurn+1, fmt.Sprintf("MessageIndex: %d", i))
+
+					if errUpdateCtx != nil {
+						log.Fatalf("Failed to update raw session context: %v", errUpdateCtx)
+					} else {
+						currentRawMessages = newHistory // Persist for next iteration
+					}
+
+					// --- Increment turn in SQLite ---
 					opStartTime = time.Now()
 					errIncrement := sessionManager.IncrementSessionTurn(sessionID)
 					opDuration = time.Since(opStartTime)

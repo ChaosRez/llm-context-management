@@ -13,11 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-const rawHistoryLength = 20
+// const rawHistoryLength = 100
 const sessionDurationDays = 1
 const defaultUserID = "default_user" // Default user ID if none provided
 const maxTurnRetries = 5
@@ -283,33 +284,64 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var finalPrompt string // Store the final prompt sent to Llama for logging/history
 	var tokenizedContext []int
+	var rawMessages []ContextStorage.RawMessage
 
 	if clientReq.Mode == "raw" {
 		log.Infof("Using 'raw' context retrieval for session %s", clientReq.SessionID)
-		getTextCtxStartTime := time.Now()
-		textContext, currentTurn, errCtx := s.sessionManager.GetTextSessionContext(clientReq.SessionID, rawHistoryLength)
-		getTextCtxDuration := time.Since(getTextCtxStartTime)
-		log.Debugf("s.sessionManager.GetTextSessionContext for session %s took %s", clientReq.SessionID, getTextCtxDuration)
-		s.writeOperationToCsv(getTextCtxStartTime, "sessionManager.GetTextSessionContext", getTextCtxDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, -1, currentTurn, -1, fmt.Sprintf("HistoryLength: %d", rawHistoryLength))
-		if errCtx != nil {
-			log.Errorf("Failed to get raw session context for %s: %v", clientReq.SessionID, errCtx)
-			http.Error(w, "Failed to retrieve session context", http.StatusInternalServerError)
-			sessionLock.Unlock()
-			log.Infof("Lock released for session %s due to context retrieval error", clientReq.SessionID)
-			return
-		}
+		var errCtx error
+		var currentTurn int
+		var getRawCtxDuration time.Duration
+		var getRawCtxStartTime time.Time
 
-		// Turn validation
-		if clientReq.Turn != currentTurn+1 {
-			log.Errorf("Turn mismatch for session %s. Client turn: %d, Server turn: %d", clientReq.SessionID, clientReq.Turn, currentTurn)
-			http.Error(w, fmt.Sprintf("Turn mismatch. Expected turn %d, but got %d.", currentTurn+1, clientReq.Turn), http.StatusConflict)
-			sessionLock.Unlock()
-			log.Warnf("Lock released for session %s due to turn mismatch", clientReq.SessionID)
-			return
+		// Turn validation with retry logic
+		for i := 0; i <= maxTurnRetries; i++ {
+			clientReq.Retries = i
+			getRawCtxStartTime = time.Now()
+			rawMessages, currentTurn, errCtx = s.contextStorage.GetRawSessionContext(clientReq.SessionID)
+			getRawCtxDuration = time.Since(getRawCtxStartTime)
+			log.Debugf("s.contextStorage.GetRawSessionContext for session %s took %s (attempt %d)", clientReq.SessionID, getRawCtxDuration, i)
+
+			if errCtx != nil {
+				if !s.contextStorage.IsNotFoundError(errCtx) {
+					log.Warnf("Failed to get raw session context for %s (proceeding without): %v", clientReq.SessionID, errCtx)
+				} else {
+					log.Infof("No existing raw context found for session %s, starting fresh.", clientReq.SessionID)
+				}
+				rawMessages = []ContextStorage.RawMessage{} // Initialize to empty if error or not found
+				currentTurn = 0                             // For a new session, turn is 0
+			} else if rawMessages != nil {
+				log.Infof("Retrieved raw context (message count %d, turn %d) for session %s", len(rawMessages), currentTurn, clientReq.SessionID)
+			} else {
+				log.Infof("No existing raw context found for session %s, starting fresh.", clientReq.SessionID)
+				rawMessages = []ContextStorage.RawMessage{} // Initialize to empty if nil
+				currentTurn = 0                             // For a new session, turn is 0
+			}
+
+			if clientReq.Turn == currentTurn+1 {
+				log.Infof("Turn validation successful for session %s on attempt %d. Client turn: %d, Server turn: %d", clientReq.SessionID, i, clientReq.Turn, currentTurn)
+				break // Correct turn, exit loop
+			}
+
+			log.Warnf("Turn mismatch for session %s on attempt %d. Client turn: %d, Server turn: %d. Retrying...", clientReq.SessionID, i, clientReq.Turn, currentTurn)
+
+			if i == maxTurnRetries {
+				log.Errorf("Turn mismatch for session %s after %d retries. Client turn: %d, Server turn: %d", clientReq.SessionID, maxTurnRetries, clientReq.Turn, currentTurn)
+				s.writeOperationToCsv(getRawCtxStartTime, "contextStorage.GetRawSessionContext", getRawCtxDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, len(rawMessages), currentTurn, clientReq.Retries, "Final attempt failed turn validation")
+				http.Error(w, fmt.Sprintf("Turn mismatch after retries. Expected turn %d, but got %d.", currentTurn+1, clientReq.Turn), http.StatusConflict)
+				sessionLock.Unlock()
+				log.Infof("Lock released for session %s due to turn mismatch after retries", clientReq.SessionID)
+				return
+			}
+			time.Sleep(turnRetryDelay)
 		}
+		s.writeOperationToCsv(getRawCtxStartTime, "contextStorage.GetRawSessionContext", getRawCtxDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, len(rawMessages), currentTurn, clientReq.Retries, "")
 
 		// Construct the prompt including context and user message for Llama.cpp
-		finalPrompt = textContext + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
+		var textContextBuilder strings.Builder
+		for _, msg := range rawMessages {
+			textContextBuilder.WriteString(fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content))
+		}
+		finalPrompt = textContextBuilder.String() + "<|im_start|>user\n" + clientReq.Prompt + "<|im_end|>\n"
 		llamaReq["prompt"] = finalPrompt
 		log.Debugf("Prepared raw prompt for session %s", clientReq.SessionID)
 
@@ -420,7 +452,7 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		sessionLock.Unlock()
 		log.Infof("Lock released for session %s (client-side mode)", clientReq.SessionID)
 	} else {
-		go s.updateHistoryAndContextAsync(clientReq, assistantMsg, tokenizedContext, sessionLock)
+		go s.updateHistoryAndContextAsync(clientReq, assistantMsg, tokenizedContext, rawMessages, sessionLock)
 	}
 
 	// --- Add session_id, user_id, and mode to the response ---
@@ -451,6 +483,7 @@ func (s *Server) updateHistoryAndContextAsync(
 	clientReq CompletionRequest,
 	assistantMsg string,
 	initialTokenizedContext []int,
+	initialRawMessages []ContextStorage.RawMessage,
 	sessionLock *sync.Mutex,
 ) {
 	// Recover from potential panics in the goroutine to prevent server crash
@@ -470,28 +503,29 @@ func (s *Server) updateHistoryAndContextAsync(
 	log.Infof("Starting async history/context update for session %s", clientReq.SessionID)
 
 	if clientReq.Mode == "raw" {
-		// --- Add user message to session history ---
-		addUserMsgStartTime := time.Now()
-		if _, err := s.sessionManager.AddMessage(clientReq.SessionID, "user", clientReq.Prompt, nil, &clientReq.Model); err != nil {
-			log.Errorf("Failed to add user message for session %s: %v", clientReq.SessionID, err)
-		} else {
-			addUserMsgDuration := time.Since(addUserMsgStartTime)
-			log.Debugf("s.sessionManager.AddMessage (user) for session %s took %s", clientReq.SessionID, addUserMsgDuration)
-			s.writeOperationToCsv(addUserMsgStartTime, "sessionManager.AddMessage", addUserMsgDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, len(clientReq.Prompt), -1, clientReq.Turn, -1, "Role: user")
+		// --- Construct new message history ---
+		if initialRawMessages == nil {
+			initialRawMessages = []ContextStorage.RawMessage{}
+		}
+		newHistory := append(initialRawMessages, ContextStorage.RawMessage{Role: "user", Content: clientReq.Prompt})
+		if assistantMsg != "" {
+			newHistory = append(newHistory, ContextStorage.RawMessage{Role: "assistant", Content: assistantMsg})
 		}
 
-		// --- Add assistant response to session history ---
-		if assistantMsg != "" {
-			addAssistantMsgStartTime := time.Now()
-			if _, err := s.sessionManager.AddMessage(clientReq.SessionID, "assistant", assistantMsg, nil, &clientReq.Model); err != nil {
-				log.Errorf("Failed to add assistant message for session %s: %v", clientReq.SessionID, err)
-			} else {
-				addAssistantMsgDuration := time.Since(addAssistantMsgStartTime)
-				log.Debugf("s.sessionManager.AddMessage (assistant) for session %s took %s", clientReq.SessionID, addAssistantMsgDuration)
-				s.writeOperationToCsv(addAssistantMsgStartTime, "sessionManager.AddMessage", addAssistantMsgDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, len(assistantMsg), -1, clientReq.Turn, -1, "Role: assistant")
-			}
+		// --- Update raw context in FReD ---
+		updateCtxOpStartTime := time.Now()
+		errUpdateCtx := s.contextStorage.UpdateRawSessionContext(clientReq.SessionID, newHistory, clientReq.Turn)
+		updateCtxOpDuration := time.Since(updateCtxOpStartTime)
+		log.Debugf("s.contextStorage.UpdateRawSessionContext for session %s took %s", clientReq.SessionID, updateCtxOpDuration)
+		s.writeOperationToCsv(updateCtxOpStartTime, "contextStorage.UpdateRawSessionContext", updateCtxOpDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, len(newHistory), clientReq.Turn, clientReq.Retries, "")
+
+		if errUpdateCtx != nil {
+			log.Errorf("Failed to update raw session context for session %s: %v", clientReq.SessionID, errUpdateCtx)
+		} else {
+			log.Infof("Updated raw context for session %s, new total messages: %d, new turn: %d", clientReq.SessionID, len(newHistory), clientReq.Turn)
 		}
-		// --- Increment turn ---
+
+		// --- Increment turn in SQLite ---
 		incrementTurnStartTime := time.Now()
 		if err := s.sessionManager.IncrementSessionTurn(clientReq.SessionID); err != nil {
 			log.Errorf("Failed to increment turn for session %s: %v", clientReq.SessionID, err)
@@ -538,22 +572,22 @@ func (s *Server) updateHistoryAndContextAsync(
 	}
 }
 
-// Start runs the HTTP server.
+// Start registers the HTTP handlers and starts the server.
 func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/completion", s.handleCompletion)
 	// TODO: Add handlers for session management (list, delete)
 	log.Infof("Starting server on %s", addr)
 
-	// Defer closing the CSV file and flushing the writer
-	defer func() {
-		if s.csvWriter != nil {
-			s.csvWriter.Flush()
-		}
-		if s.csvFile != nil {
-			s.csvFile.Close()
-		}
-	}()
-
 	return http.ListenAndServe(addr, mux)
+}
+
+// Stop gracefully shuts down the server (defered from main), closing resources like the CSV logger.
+func (s *Server) Stop() {
+	log.Infof("Stopping server...")
+	if s.csvFile != nil {
+		log.Infof("Flushing and closing CSV log file: %s", s.csvFile.Name())
+		s.csvWriter.Flush()
+		s.csvFile.Close()
+	}
 }

@@ -315,6 +315,7 @@ func (mgr *SQLiteSessionManager) GetSessionMessages(sessionID string, limit int)
 }
 
 // GetTextSessionContext returns formatted context for LLM inference and the current session turn.
+/*
 func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMessages int) (string, int, error) {
 	startTime := time.Now()
 	defer func() {
@@ -373,6 +374,7 @@ func (mgr *SQLiteSessionManager) GetTextSessionContext(sessionID string, maxMess
 
 	return formatted.String(), turn, nil
 }
+*/
 
 func (mgr *SQLiteSessionManager) DeleteSession(sessionID string) error {
 	startTime := time.Now()
