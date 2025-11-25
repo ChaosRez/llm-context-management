@@ -1,7 +1,12 @@
-# DisCEdge
-Distributed Context Management for Large Language Models at the Edge
+# DisCEdge: Distributed Context Management for Large Language Models at the Edge
+
+DisCEdge is a distributed context management system designed to enable efficient, low-latency Large Language Model (LLM) inference in edge computing environments.
+
+Deploying LLMs at the edge offers significant privacy and latency benefits, but managing state across geo-distributed nodes is a major challenge. DisCEdge addresses this by replicating user context (such as session history and preferences) in **tokenized form**. By maintaining context as token sequences rather than raw text, the system avoids redundant tokenization overhead, minimizes network bandwidth usage, and ensures data consistency as mobile clients roam between edge nodes.
+
 
 ![DisCEdge Architecture](architecture-edge.svg)
+*DisCEdge Architecture Overview. The system consists of modular edge nodes containing a Context Manager, LLM Service, and Distributed KV Store.*
 
 ## Configuration
 
@@ -54,7 +59,7 @@ The response from LLaMa.cpp is augmented with session information.
 
 ### Scenario Mode
 
-When `runServerMode` is `false`, the application runs in a non-interactive test mode based on a scenario file. This mode is useful for automated testing and benchmarking.
+When `runServerMode` is `false`, Context Manager runs in a non-interactive test mode based on a scenario file. This mode is useful for automated testing and benchmarking.
 
 - It reads a sequence of user messages from a YAML file specified by `scenarioFilePath`.
 - At startup, it prompts the user to choose the context method (`raw` or `tokenized`) for the entire scenario run.
@@ -63,7 +68,7 @@ When `runServerMode` is `false`, the application runs in a non-interactive test 
 
 
 
-## Experiment setup
+## Experiment setup (paper version)
 1. run `fred/etd.sh` on a node
 2. clear etcd data `etcdctl del "" --from-key`
 3. run [LLaMa.cpp-fastencode](https://github.com/ChaosRez/llama.cpp-fastencode) on nodes. This fork is modified to accept a pre-tokenized context, which is required for the `tokenized` mode.
