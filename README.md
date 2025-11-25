@@ -4,25 +4,19 @@ DisCEdge is a distributed context management system designed to enable efficient
 
 Deploying LLMs at the edge offers significant privacy and latency benefits, but managing state across geo-distributed nodes is a major challenge. DisCEdge addresses this by replicating user context (such as session history and preferences) in **tokenized form**. By maintaining context as token sequences rather than raw text, the system avoids redundant tokenization overhead, minimizes network bandwidth usage, and ensures data consistency as mobile clients roam between edge nodes.
 
+DisCEdge processes requests in three context modes: (i) **raw** text mode, where the context is maintained as raw text, (ii) **tokenized** mode, where the context is maintained as tokenized data, and (iii) **client-side** mode, where the context is maintained on the client device and thus the requests are just forwarded to the LLM Service by the Context Manager.
+
 
 ![DisCEdge Architecture](architecture-edge.svg)
 *DisCEdge Architecture Overview. The system consists of modular edge nodes containing a Context Manager, LLM Service, and Distributed KV Store.*
 
-## Configuration
-- `runServerMode`: Set to `true` for server mode or `false` for scenario mode.
-- `serverListenAddr`: The address and port for the server to listen on (e.g., `:8081`).
-- `scenarioFilePath`: Path to the YAML file for scenario mode (e.g., `testdata/example_robo_longer.yml`).
-- `llamaURL`: URL of the LLaMa.cpp server.
-- `fredAddr`: Address of the FReD service.
-- `fredKeygroup`: Keygroup to use in FReD for context storage.
-
 ## Usage
 
-The application can be run in two modes:
+The Context Manager can be run in two modes:
 
 ### Server Mode
 
-When `runServerMode` is `true`, the application starts an HTTP server that listens for completion requests. It manages session and context persistence automatically.
+When `runServerMode` is `true`, the Context Manager starts an HTTP server that listens for completion requests. It manages session and context persistence automatically.
 
 The API payload is compatible with the LLaMa.cpp `/completion` endpoint but includes additional parameters for context management:
 
@@ -63,6 +57,10 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
 - It processes the messages sequentially, simulating a conversation and logging performance metrics to a CSV file in `testdata/log/`.
 
 
+## Configuration
+- `runServerMode`: Set to `true` for server mode or `false` for scenario mode.
+- `serverListenAddr`: The address and port for the server to listen on (e.g., `:8081`).
+- `scenarioFilePath`: Path to the YAML file for scenario mode (e.g., `testdata/example_robo_longer.yml`).
 
 
 ## Experiment setup (paper version)
