@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	SessionManager "llm-context-management/internal/app/session_manager"
 	ContextStorage "llm-context-management/internal/pkg/context_storage"
 	Llama "llm-context-management/internal/pkg/llama_wrapper"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // const rawHistoryLength = 100
@@ -525,15 +526,15 @@ func (s *Server) updateHistoryAndContextAsync(
 			log.Infof("Updated raw context for session %s, new total messages: %d, new turn: %d", clientReq.SessionID, len(newHistory), clientReq.Turn)
 		}
 
-		// --- Increment turn in SQLite ---
-		incrementTurnStartTime := time.Now()
-		if err := s.sessionManager.IncrementSessionTurn(clientReq.SessionID); err != nil {
-			log.Errorf("Failed to increment turn for session %s: %v", clientReq.SessionID, err)
-		} else {
-			incrementTurnDuration := time.Since(incrementTurnStartTime)
-			log.Infof("Incremented turn for session %s to %d", clientReq.SessionID, clientReq.Turn)
-			s.writeOperationToCsv(incrementTurnStartTime, "sessionManager.IncrementSessionTurn", incrementTurnDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, -1, clientReq.Turn-1, -1, "")
-		}
+		//// --- Increment turn in SQLite ---
+		//incrementTurnStartTime := time.Now()
+		//if err := s.sessionManager.IncrementSessionTurn(clientReq.SessionID); err != nil {
+		//	log.Errorf("Failed to increment turn for session %s: %v", clientReq.SessionID, err)
+		//} else {
+		//	incrementTurnDuration := time.Since(incrementTurnStartTime)
+		//	log.Infof("Incremented turn for session %s to %d", clientReq.SessionID, clientReq.Turn)
+		//	s.writeOperationToCsv(incrementTurnStartTime, "sessionManager.IncrementSessionTurn", incrementTurnDuration, clientReq.Mode, "ServerMode", clientReq.SessionID, -1, -1, -1, clientReq.Turn-1, -1, "")
+		//}
 	} else if clientReq.Mode == "tokenized" {
 		if assistantMsg == "" {
 			log.Warnf("No assistant message to process for tokenized context update in session %s.", clientReq.SessionID)
