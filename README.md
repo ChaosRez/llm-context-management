@@ -9,9 +9,6 @@ Deploying LLMs at the edge offers significant privacy and latency benefits, but 
 *DisCEdge Architecture Overview. The system consists of modular edge nodes containing a Context Manager, LLM Service, and Distributed KV Store.*
 
 ## Configuration
-
-Configuration is managed via constants in `cmd/main.go`.
-
 - `runServerMode`: Set to `true` for server mode or `false` for scenario mode.
 - `serverListenAddr`: The address and port for the server to listen on (e.g., `:8081`).
 - `scenarioFilePath`: Path to the YAML file for scenario mode (e.g., `testdata/example_robo_longer.yml`).
@@ -59,7 +56,7 @@ The response from LLaMa.cpp is augmented with session information.
 
 ### Scenario Mode
 
-When `runServerMode` is `false`, Context Manager runs in a non-interactive test mode based on a scenario file. This mode is useful for automated testing and benchmarking.
+When `runServerMode` is `false`, Context Manager runs in a non-interactive test mode based on a scenario file. This mode is useful for development and testing.
 
 - It reads a sequence of user messages from a YAML file specified by `scenarioFilePath`.
 - At startup, it prompts the user to choose the context method (`raw` or `tokenized`) for the entire scenario run.
