@@ -63,7 +63,7 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
 - `scenarioFilePath`: Path to the YAML file for scenario mode (e.g., `testdata/example_robo_longer.yml`).
 
 
-## Experiment setup (paper version)
+## Run DisCEdge (paper version)
 1. run `fred/etd.sh` on a node
 2. clear etcd data `etcdctl del "" --from-key`
 3. run [LLaMa.cpp-fastencode](https://github.com/ChaosRez/llama.cpp-fastencode) on nodes. This fork is modified to accept a pre-tokenized context, which is required for the `tokenized` mode.
@@ -75,7 +75,7 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
      - `-b N`: batch size for prompt processing (default: 512)
 4. run `fred/edge-node-*.sh` on nodes
 5. run LLM Context Manager on nodes (check `fredAddr` to be correct)
-6. run `fred_traffic_monitor.sh` on nodes to capture FReD traffic
+6. (optional) run `fred_traffic_monitor.sh` on edge nodes to capture inter-node DB traffic 
    - Example: `./fred_traffic_monitor.sh raw-TX2 250` or `fred_traffic_monitor.sh tokenized-TX2 250`
    - See `fred_traffic_monitor.md` for detailed usage, prerequisites, and experiment workflow
 7. run client from [discedge-client-experiments](https://github.com/ChaosRez/discedge-client-experiments) repository
@@ -83,7 +83,7 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
 ### Notes
 - All FReD scripts are in `fred/`.
 - The `config.sh` script sets up the environment variables such as node IP addresses. No need to run this script manually, it is sourced automatically by other scripts.
-- You need to generate certificates `gen-cert.sh`
+- You need to generate certificates `gen-cert.sh` for etcd/FReD
 
 ### etcd client useful commands
 ```bash
