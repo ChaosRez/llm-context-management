@@ -78,7 +78,7 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
 6. run `fred_traffic_monitor.sh` on nodes to capture FReD traffic
    - Example: `./fred_traffic_monitor.sh raw-TX2 250` or `fred_traffic_monitor.sh tokenized-TX2 250`
    - See `fred_traffic_monitor.md` for detailed usage, prerequisites, and experiment workflow
-7. run client
+7. run client from [discedge-client-experiments](https://github.com/ChaosRez/discedge-client-experiments) repository
 
 ### Notes
 - All FReD scripts are in `fred/`.
