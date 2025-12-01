@@ -10,6 +10,25 @@ DisCEdge processes requests in three context modes: (i) **raw** text mode, where
 ![DisCEdge Architecture](architecture-edge.svg)
 *DisCEdge Architecture Overview. The system consists of modular edge nodes containing a Context Manager, LLM Service, and Distributed KV Store.*
 
+## Research
+
+If you use this software in a publication, please cite it as:
+
+### Text
+
+M. Malekabbasi, M. Wang, and D. Bermbach, **DisCEdge: Distributed Context Management for Large Language Models at the Edge**, 2025. ([arXiv](https://arxiv.org/abs/2511.22599))
+
+### BibTeX
+
+```bibtex
+@article{malekabbasi2025discedge,
+  title={DisCEdge: Distributed Context Management for Large Language Models at the Edge},
+  author={Malekabbasi, Mohammadreza and Wang, Minghe and Bermbach, David},
+  year={2025},
+  url={https://arxiv.org/abs/2511.22599}
+}
+```
+
 ## Usage
 
 The Context Manager can be run in two modes:

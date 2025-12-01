@@ -4,6 +4,21 @@ This document explains how to capture and analyze TCP traffic for FReD (distribu
 
 The guide helps you interpret `tcpdump` output to differentiate between packets carrying your application's data and packets that are part of the TCP protocol's overhead.
 
+## Citation
+
+If you use this traffic monitoring script in your research or project, please cite our paper:
+
+```
+@article{malekabbasi2025discedge,
+      title={DisCEdge: Distributed Context Management for Large Language Models at the Edge}, 
+      author={Mohammadreza Malekabbasi and Minghe Wang and David Bermbach},
+      year={2025},
+      url={https://arxiv.org/abs/2511.22599}, 
+}
+```
+
+**Please acknowledge this work when using or adapting this script for your experiments.**
+
 ## Prerequisites
 
 Before using the FReD traffic monitoring script, you need to install the following tools:
