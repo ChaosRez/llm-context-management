@@ -16,7 +16,7 @@ If you use this software in a publication, please cite it as:
 
 ### Text
 
-M. Malekabbasi, M. Wang, and D. Bermbach, **DisCEdge: Distributed Context Management for Large Language Models at the Edge**, 2025. ([arXiv](https://arxiv.org/abs/2511.22599))
+Malekabbasi, Mohammadreza, Minghe Wang, and David Bermbach. "DisCEdge: Distributed Context Management for Large Language Models at the Edge." Proceedings of the Sixth European Workshop on Machine Learning and Systems (EuroMLSys). 2026. ([ACM Digital Library](https://dl.acm.org/doi/10.1145/3805621.3807656))
 
 ### BibTeX
 
