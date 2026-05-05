@@ -21,11 +21,21 @@ M. Malekabbasi, M. Wang, and D. Bermbach, **DisCEdge: Distributed Context Manage
 ### BibTeX
 
 ```bibtex
-@article{malekabbasi2025discedge,
-  title={DisCEdge: Distributed Context Management for Large Language Models at the Edge},
-  author={Malekabbasi, Mohammadreza and Wang, Minghe and Bermbach, David},
-  year={2025},
-  url={https://arxiv.org/abs/2511.22599}
+@inproceedings{malekabbasi2026discedge,
+    author = "Malekabbasi, Mohammadreza and Wang, Minghe and Bermbach, David",
+    title = "DisCEdge: Distributed Context Management for Large Language Models at the Edge",
+    year = 2026,
+    isbn = "9798400726057",
+    publisher = "Association for Computing Machinery",
+    address = "New York, NY, USA",
+    url = "https://doi.org/10.1145/3805621.3807656",
+    doi = "10.1145/3805621.3807656",
+    booktitle = "Proceedings of the Sixth European Workshop on Machine Learning and Systems",
+    pages = "296--303",
+    numpages = 8,
+    keywords = "Edge Computing, Edge Intelligence, Geo-distributed Storage, Large Language Models (LLMs)",
+    location = "Edinburgh, United Kingdom",
+    series = "EuroMLSys '26"
 }
 ```
 
