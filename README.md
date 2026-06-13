@@ -96,7 +96,7 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
 1. run `fred/etd.sh` on a node
 2. clear etcd data `etcdctl del "" --from-key`
 3. run [LLaMa.cpp-fastencode](https://github.com/ChaosRez/llama.cpp-fastencode) on nodes. This fork is modified to accept a pre-tokenized context, which is required for the `tokenized` mode.
-   - `./server -m ./Qwen1.5-0.5B-Chat-Q4_K_M.gguf -c 2048 -n 128 -b 512 -ngl 33` (had to explicitly specify for Jetson TX2 to run on GPU)
+   - `./server -m ./Qwen1.5-0.5B-Chat-Q4_K_M.gguf -c 2048 -n 128 -b 512 -ngl 33` (had to explicitly specify for Jetson TX2 to run on GPU.)
    - Parameters:
      - `-c N`: size of the prompt context (default: 512)
      - `-n N`: maximum tokens to predict (default: -1)
@@ -113,6 +113,7 @@ When `runServerMode` is `false`, Context Manager runs in a non-interactive test 
 - All FReD scripts are in `fred/`.
 - The `config.sh` script sets up the environment variables such as node IP addresses. No need to run this script manually, it is sourced automatically by other scripts.
 - You need to generate certificates `gen-cert.sh` for etcd/FReD
+- A [blog post](http://blog.codinginparadise.org/2021/01/howto-getting-productive-development.html) on TX2 fresh setup.
 
 ### etcd client useful commands
 ```bash
